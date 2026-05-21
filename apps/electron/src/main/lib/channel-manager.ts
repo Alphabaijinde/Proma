@@ -7,9 +7,11 @@
  */
 
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { execFile } from 'node:child_process'
 import { safeStorage } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { getChannelsPath } from './config-paths'
+import { resolveCodexCliLaunch } from './codex-cli'
 import type {
   Channel,
   ChannelCreateInput,
@@ -28,6 +30,8 @@ import { normalizeAnthropicBaseUrl, normalizeBaseUrl, normalizeVersionedAnthropi
 
 /** 当前配置版本 */
 const CONFIG_VERSION = 1
+export const CODEX_CLI_CHANNEL_ID = 'codex-cli-local'
+export const CODEX_CLI_DEFAULT_MODEL = 'gpt-5.5'
 
 /**
  * 读取渠道配置文件
@@ -113,6 +117,7 @@ export function listChannels(): Channel[] {
   const config = readConfig()
 
   // 首次使用：如果没有 DeepSeek 渠道，自动创建预设（使用 Anthropic 协议）
+  let changed = false
   const hasDeepSeek = config.channels.some(
     (c) => c.provider === 'deepseek' || c.baseUrl.includes('api.deepseek.com'),
   )
@@ -133,9 +138,33 @@ export function listChannels(): Channel[] {
       updatedAt: now,
     }
     config.channels.push(presetChannel)
-    writeConfig(config)
+    changed = true
     console.log('[渠道管理] 已自动创建 DeepSeek 预设渠道')
-    return config.channels
+  }
+
+  const hasCodexCli = config.channels.some((c) => c.provider === 'codex-cli')
+  if (!hasCodexCli) {
+    const now = Date.now()
+    const presetChannel: Channel = {
+      id: CODEX_CLI_CHANNEL_ID,
+      name: 'Codex CLI',
+      provider: 'codex-cli',
+      baseUrl: '',
+      apiKey: encryptApiKey(''),
+      models: [
+        { id: CODEX_CLI_DEFAULT_MODEL, name: 'GPT-5.5', enabled: true },
+      ],
+      enabled: true,
+      createdAt: now,
+      updatedAt: now,
+    }
+    config.channels.push(presetChannel)
+    changed = true
+    console.log('[渠道管理] 已自动创建 Codex CLI 本地 Agent 渠道')
+  }
+
+  if (changed) {
+    writeConfig(config)
   }
 
   return config.channels
@@ -278,6 +307,8 @@ export async function testChannel(channelId: string): Promise<ChannelTestResult>
       case 'qwen':
       case 'custom':
         return await testOpenAICompatible(channel.baseUrl, apiKey, proxyUrl)
+      case 'codex-cli':
+        return await testCodexCli()
       case 'google':
         return await testGoogle(channel.baseUrl, apiKey, proxyUrl)
       default:
@@ -389,6 +420,71 @@ async function testOpenAICompatible(baseUrl: string, apiKey: string, proxyUrl?: 
   return { success: false, message: `请求失败 (${response.status}): ${text.slice(0, 200)}` }
 }
 
+async function testCodexCli(): Promise<ChannelTestResult> {
+  const launch = resolveCodexCliLaunch()
+
+  const versionResult = await new Promise<{ ok: boolean; stdout: string; stderr: string; message?: string }>((resolve) => {
+    execFile(
+      launch.command,
+      [...launch.argsPrefix, '--version'],
+      { timeout: 10_000, windowsHide: true },
+      (error, stdout, stderr) => {
+        if (error) {
+          const detail = stderr?.toString().trim() || error.message
+          resolve({ ok: false, stdout: stdout.toString(), stderr: stderr.toString(), message: detail })
+          return
+        }
+        resolve({ ok: true, stdout: stdout.toString(), stderr: stderr.toString() })
+      },
+    )
+  })
+
+  if (!versionResult.ok) {
+    return { success: false, message: `Codex CLI 不可用: ${versionResult.message}` }
+  }
+
+  const version = versionResult.stdout.trim()
+  const loginResult = await new Promise<{ ok: boolean; stdout: string; stderr: string; message?: string }>((resolve) => {
+    execFile(
+      launch.command,
+      [...launch.argsPrefix, 'login', 'status'],
+      { timeout: 10_000, windowsHide: true },
+      (error, stdout, stderr) => {
+        if (error) {
+          const detail = stdout.toString().trim() || stderr.toString().trim() || error.message
+          resolve({ ok: false, stdout: stdout.toString(), stderr: stderr.toString(), message: detail })
+          return
+        }
+        resolve({ ok: true, stdout: stdout.toString(), stderr: stderr.toString() })
+      },
+    )
+  })
+
+  if (!loginResult.ok) {
+    const detail = loginResult.message || 'Not logged in'
+    return {
+      success: false,
+      message: `${version || 'Codex CLI 可用'}，但当前未登录：${detail}`,
+    }
+  }
+
+  const loginStatus = loginResult.stdout.trim()
+  return {
+    success: true,
+    message: `${version || 'Codex CLI 可用'}；${loginStatus || '已登录'}`,
+  }
+}
+
+function fetchCodexCliModels(): FetchModelsResult {
+  return {
+    success: true,
+    message: '已加载 Codex CLI 本地模型',
+    models: [
+      { id: CODEX_CLI_DEFAULT_MODEL, name: 'GPT-5.5', enabled: true },
+    ],
+  }
+}
+
 /**
  * 测试 Google Generative AI API 连接
  */
@@ -437,6 +533,8 @@ export async function testChannelDirect(input: FetchModelsInput): Promise<Channe
       case 'qwen':
       case 'custom':
         return await testOpenAICompatible(input.baseUrl, input.apiKey, proxyUrl)
+      case 'codex-cli':
+        return await testCodexCli()
       case 'google':
         return await testGoogle(input.baseUrl, input.apiKey, proxyUrl)
       default:
@@ -473,6 +571,8 @@ export async function fetchModels(input: FetchModelsInput): Promise<FetchModelsR
       case 'qwen':
       case 'custom':
         return await fetchOpenAICompatibleModels(input.baseUrl, input.apiKey, proxyUrl)
+      case 'codex-cli':
+        return fetchCodexCliModels()
       case 'google':
         return await fetchGoogleModels(input.baseUrl, input.apiKey, proxyUrl)
       default:

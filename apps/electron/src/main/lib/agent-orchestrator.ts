@@ -355,6 +355,16 @@ const DEFAULT_SESSION_TITLE = '新 Agent 会话'
 /** 默认模型 ID */
 const DEFAULT_MODEL_ID = 'claude-sonnet-4-6'
 
+function buildLocalTitleFromMessage(userMessage: string): string | null {
+  const cleaned = userMessage
+    .replace(/<attached_files>[\s\S]*?<\/attached_files>/g, ' ')
+    .replace(/<file[\s\S]*?<\/file>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  return cleaned ? cleaned.slice(0, MAX_TITLE_LENGTH) : null
+}
+
 /**
  * 判断模型是否支持 1M context window beta（context-1m-2025-08-07）
  * 当前支持：Claude Sonnet 4 / 4.5 / 4.6、Opus 4.6 / 4.7、DeepSeek V4 系列
@@ -372,6 +382,35 @@ function supports1MContext(modelId: string): boolean {
   // DeepSeek V4 系列（deepseek-v4-pro、deepseek-v4-flash）
   if (m.includes('deepseek-v4')) return true
   return false
+}
+
+const LOOPBACK_NO_PROXY_HOSTS = ['localhost', '127.0.0.1', '::1']
+
+function isLoopbackUrl(url: string | undefined): boolean {
+  if (!url) return false
+  try {
+    const hostname = new URL(url).hostname.toLowerCase()
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]'
+  } catch {
+    return false
+  }
+}
+
+function mergeNoProxy(value: string | undefined): string {
+  const entries = new Set(
+    (value || '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean),
+  )
+  for (const host of LOOPBACK_NO_PROXY_HOSTS) entries.add(host)
+  return Array.from(entries).join(',')
+}
+
+function ensureLoopbackNoProxy(env: Record<string, string | undefined>): void {
+  const noProxy = mergeNoProxy(env.NO_PROXY || env.no_proxy)
+  env.NO_PROXY = noProxy
+  env.no_proxy = noProxy
 }
 
 // ===== AgentOrchestrator =====
@@ -452,7 +491,11 @@ export class AgentOrchestrator {
     // 显式控制 ANTHROPIC_BASE_URL：仅在用户配置了自定义 Base URL 时注入
     // 使用统一的 normalizeAnthropicBaseUrlForSdk 规范化，SDK 内部会自动拼接 /v1/messages
     if (baseUrl && baseUrl !== DEFAULT_ANTHROPIC_URL) {
-      sdkEnv.ANTHROPIC_BASE_URL = normalizeAnthropicBaseUrlForSdk(baseUrl)
+      const normalizedBaseUrl = normalizeAnthropicBaseUrlForSdk(baseUrl)
+      sdkEnv.ANTHROPIC_BASE_URL = normalizedBaseUrl
+      if (isLoopbackUrl(normalizedBaseUrl)) {
+        ensureLoopbackNoProxy(sdkEnv)
+      }
     }
 
     const proxyUrl = await getEffectiveProxyUrl()
@@ -627,6 +670,14 @@ export class AgentOrchestrator {
         return null
       }
 
+      if (channel.provider === 'codex-cli') {
+        const title = buildLocalTitleFromMessage(userMessage)
+        if (title) {
+          console.log(`[Agent 标题生成] Codex CLI 使用本地标题: "${title}"`)
+        }
+        return title
+      }
+
       const apiKey = decryptApiKey(channelId)
       const providerAdapter = getAdapter(channel.provider)
       const request = providerAdapter.buildTitleRequest({
@@ -797,8 +848,24 @@ export class AgentOrchestrator {
       callbacks.onComplete([], { startedAt: input.startedAt })
     }
 
-    // 1. Windows 平台：检查 Shell 环境可用性
-    if (process.platform === 'win32') {
+    // 1. 获取渠道信息
+    const channel = getChannelById(channelId)
+    if (!channel) {
+      reportPreflightError({
+        code: 'channel_not_found',
+        title: '渠道不存在',
+        message: '当前会话引用的渠道已被删除或不可用，请在设置中重新选择。',
+        actions: [
+          { key: 's', label: '打开渠道设置', action: 'open_channel_settings' },
+        ],
+        canRetry: false,
+      })
+      return
+    }
+    const isCodexCliProvider = channel.provider === 'codex-cli'
+
+    // 1.5 Windows 平台：Claude Agent SDK 需要 Git Bash/WSL；Codex CLI 走自己的本地运行时。
+    if (process.platform === 'win32' && !isCodexCliProvider) {
       const runtimeStatus = getRuntimeStatus()
       const shellStatus = runtimeStatus?.shell
 
@@ -822,35 +889,23 @@ export class AgentOrchestrator {
       }
     }
 
-    // 2. 获取渠道信息并解密 API Key
-    const channel = getChannelById(channelId)
-    if (!channel) {
-      reportPreflightError({
-        code: 'channel_not_found',
-        title: '渠道不存在',
-        message: '当前会话引用的渠道已被删除或不可用，请在设置中重新选择。',
-        actions: [
-          { key: 's', label: '打开渠道设置', action: 'open_channel_settings' },
-        ],
-        canRetry: false,
-      })
-      return
-    }
-
-    let apiKey: string
-    try {
-      apiKey = decryptApiKey(channelId)
-    } catch {
-      reportPreflightError({
-        code: 'api_key_decrypt_failed',
-        title: 'API Key 解密失败',
-        message: '无法解密此渠道的 API Key，可能是系统密钥环异常。请到设置中重新填写 API Key。',
-        actions: [
-          { key: 's', label: '打开渠道设置', action: 'open_channel_settings' },
-        ],
-        canRetry: false,
-      })
-      return
+    // 2. 解密 API Key。Codex CLI 使用本机 codex login 状态，不依赖 Proma 渠道 API Key。
+    let apiKey = ''
+    if (!isCodexCliProvider) {
+      try {
+        apiKey = decryptApiKey(channelId)
+      } catch {
+        reportPreflightError({
+          code: 'api_key_decrypt_failed',
+          title: 'API Key 解密失败',
+          message: '无法解密此渠道的 API Key，可能是系统密钥环异常。请到设置中重新填写 API Key。',
+          actions: [
+            { key: 's', label: '打开渠道设置', action: 'open_channel_settings' },
+          ],
+          canRetry: false,
+        })
+        return
+      }
     }
 
     // 2.1 立即抢占会话槽位（在所有同步检查通过后、第一个 await 之前）
@@ -869,26 +924,35 @@ export class AgentOrchestrator {
     delete process.env.ANTHROPIC_AUTH_TOKEN
     delete process.env.ANTHROPIC_BASE_URL
     delete process.env.ANTHROPIC_CUSTOM_HEADERS
-    if (channel.provider === 'kimi-coding') {
+    if (!isCodexCliProvider && channel.provider === 'kimi-coding') {
       // Kimi Coding Plan：只用 Bearer + 必须带 User-Agent
       process.env.ANTHROPIC_AUTH_TOKEN = apiKey
       process.env.ANTHROPIC_CUSTOM_HEADERS = 'User-Agent: KimiCLI/1.3'
-    } else if (channel.provider === 'minimax') {
+    } else if (!isCodexCliProvider && channel.provider === 'minimax') {
       // MiniMax Coding Plan：Claude Code 兼容配置使用 Bearer
       process.env.ANTHROPIC_AUTH_TOKEN = apiKey
-    } else {
+    } else if (!isCodexCliProvider) {
       process.env.ANTHROPIC_API_KEY = apiKey
     }
     // 使用与 buildSdkEnv 相同的规范化逻辑，确保 process.env 和 sdkEnv 中的 URL 一致
     if (channel.baseUrl && channel.baseUrl !== 'https://api.anthropic.com') {
-      process.env.ANTHROPIC_BASE_URL = normalizeAnthropicBaseUrlForSdk(channel.baseUrl)
+      const normalizedBaseUrl = normalizeAnthropicBaseUrlForSdk(channel.baseUrl)
+      process.env.ANTHROPIC_BASE_URL = normalizedBaseUrl
+      if (isLoopbackUrl(normalizedBaseUrl)) {
+        ensureLoopbackNoProxy(process.env)
+      }
     }
 
-    const sdkEnv = await this.buildSdkEnv(apiKey, channel.baseUrl, channel.provider)
+    const sdkEnv = isCodexCliProvider ? {} : await this.buildSdkEnv(apiKey, channel.baseUrl, channel.provider)
 
     // 4. 读取已有的 SDK session ID（用于 resume）
     const sessionMeta = getAgentSessionMeta(sessionId)
     let existingSdkSessionId = sessionMeta?.sdkSessionId
+    if (isCodexCliProvider && existingSdkSessionId && !/^019[0-9a-f-]+$/i.test(existingSdkSessionId)) {
+      console.log(`[Agent 编排] 忽略旧版 Codex 合成 session_id: ${existingSdkSessionId}`)
+      existingSdkSessionId = undefined
+      try { updateAgentSessionMeta(sessionId, { sdkSessionId: undefined }) } catch { /* 忽略 */ }
+    }
 
     // 4.1 检测回退后的 resume 截断点（快照回退功能）
     let rewindResumeAt: string | undefined
@@ -914,7 +978,10 @@ export class AgentOrchestrator {
 
     // 6. 状态初始化
     const accumulatedMessages: SDKMessage[] = []
-    let resolvedModel = modelId || DEFAULT_MODEL_ID
+    const effectiveModelId = channel.provider === 'codex-cli'
+      ? (modelId || 'gpt-5.5')
+      : (modelId || DEFAULT_MODEL_ID)
+    let resolvedModel = effectiveModelId
     let titleGenerationStarted = false
     let agentCwd: string | undefined
     let workspaceSlug: string | undefined
@@ -922,12 +989,12 @@ export class AgentOrchestrator {
 
     try {
       // 8. 动态导入 SDK
-      const sdk = await import('@anthropic-ai/claude-agent-sdk')
+      const sdk = isCodexCliProvider ? null : await import('@anthropic-ai/claude-agent-sdk')
 
       // 9. 构建 SDK query
-      const cliPath = resolveSDKCliPath()
+      const cliPath = isCodexCliProvider ? 'codex-cli' : resolveSDKCliPath()
 
-      if (!existsSync(cliPath)) {
+      if (!isCodexCliProvider && !existsSync(cliPath)) {
         const subpkg = `@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}`
         console.error(`[Agent 编排] SDK native binary 不存在: ${cliPath}`)
         reportPreflightError({
@@ -959,7 +1026,7 @@ export class AgentOrchestrator {
       }
 
       console.log(
-        `[Agent 编排] 启动 SDK — binary: ${cliPath}, 模型: ${modelId || DEFAULT_MODEL_ID}, resume: ${existingSdkSessionId ?? '无'}`,
+        `[Agent 编排] 启动 SDK — binary: ${cliPath}, 模型: ${effectiveModelId}, resume: ${existingSdkSessionId ?? '无'}`,
       )
 
       // 确定 Agent 工作目录
@@ -989,7 +1056,7 @@ export class AgentOrchestrator {
       // forkSourceDir 仅作为备用参考字段保留，不再影响 agentCwd。
 
       // 9.5 确保 SDK 项目设置（plansDirectory → .context）
-      {
+      if (!isCodexCliProvider) {
         const claudeSettingsDir = join(agentCwd, '.claude')
         if (!existsSync(claudeSettingsDir)) mkdirSync(claudeSettingsDir, { recursive: true })
         const settingsPath = join(claudeSettingsDir, 'settings.json')
@@ -1022,9 +1089,11 @@ export class AgentOrchestrator {
       }
 
       // 10. 构建 MCP 服务器配置 + 记忆工具 + 生图工具 + 自定义工具
-      const mcpServers = this.buildMcpServers(workspaceSlug)
-      await this.injectMemoryTools(sdk, mcpServers)
-      await this.injectNanoBananaTools(sdk, mcpServers, sessionId, agentCwd)
+      const mcpServers = isCodexCliProvider ? {} : this.buildMcpServers(workspaceSlug)
+      if (sdk) {
+        await this.injectMemoryTools(sdk, mcpServers)
+        await this.injectNanoBananaTools(sdk, mcpServers, sessionId, agentCwd)
+      }
 
       // 合并外部注入的自定义 MCP 服务器（如飞书群聊工具）
       if (customMcpServers) {
@@ -1266,14 +1335,15 @@ export class AgentOrchestrator {
 
       // 13. 构建 Adapter 查询选项
       // 检测用户选用的模型是否为 Claude 系列，决定 SubAgent 是否使用独立模型分层
-      const claudeAvailable = (modelId || DEFAULT_MODEL_ID).toLowerCase().includes('claude')
+      const claudeAvailable = effectiveModelId.toLowerCase().includes('claude')
       const maxTurns = appSettings.agentMaxTurns && appSettings.agentMaxTurns > 0
         ? appSettings.agentMaxTurns
         : undefined
       const queryOptions: ClaudeAgentQueryOptions = {
         sessionId,
+        provider: channel.provider,
         prompt: finalPrompt,
-        model: modelId || DEFAULT_MODEL_ID,
+        model: effectiveModelId,
         cwd: agentCwd,
         sdkCliPath: cliPath,
         env: sdkEnv,
@@ -1333,7 +1403,7 @@ export class AgentOrchestrator {
         }),
         // 1M context window: 支持的模型自动启用 beta（Claude: Sonnet 4+ / Opus 4.6+、DeepSeek V4 系列）
         // 未启用时 SDK 默认 200K 并在约 150K 触发压缩；启用后上限提升至 1M
-        ...(supports1MContext(modelId || DEFAULT_MODEL_ID) && {
+        ...(supports1MContext(effectiveModelId) && {
           betas: ['context-1m-2025-08-07'] as SdkBeta[],
         }),
         // 内置 SubAgent 定义（code-reviewer / explorer / researcher）

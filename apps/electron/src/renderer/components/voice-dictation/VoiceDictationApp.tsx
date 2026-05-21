@@ -14,6 +14,11 @@ import { useVoiceWindowLayout } from './use-voice-window-layout'
 const MAX_QUEUED_CHUNKS = 60
 const STOP_COMMIT_TIMEOUT_MS = 1400
 const FINAL_COMMIT_DELAY_MS = 180
+const MISSING_CREDENTIALS_MESSAGE = '请先在设置 > 语音输入中填写 APP ID、Access Token 和 Resource ID'
+
+function hasVoiceDictationCredentials(settings: VoiceDictationSettings): boolean {
+  return Boolean(settings.appId && settings.accessToken && settings.resourceId)
+}
 
 export function VoiceDictationApp(): React.ReactElement {
   const [sessionId, setSessionId] = React.useState<string | null>(null)
@@ -309,6 +314,12 @@ export function VoiceDictationApp(): React.ReactElement {
     if (!settings.enabled) {
       setStatus('error')
       setMessage('请先在设置中启用语音输入')
+      cleanupAudio()
+      return
+    }
+    if (settings.provider === 'doubao' && !hasVoiceDictationCredentials(settings)) {
+      setStatus('error')
+      setMessage(MISSING_CREDENTIALS_MESSAGE)
       cleanupAudio()
       return
     }

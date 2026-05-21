@@ -316,8 +316,8 @@ function NanoBananaSettings(): React.ReactElement {
                 </a>
                 {' '}获取 Gemini API Key
               </li>
-              <li>将 API Key 填入下方，可选修改 API 地址和模型</li>
-              <li>开启开关即可在对话中使用生图能力</li>
+              <li>将 API Key 填入下方，或设置 GEMINI_API_KEY / GOOGLE_API_KEY 环境变量</li>
+              <li>开启开关即可在对话中使用生图能力；没有 API Key 时会创建 Codex 文件交接请求</li>
             </ol>
           </div>
 
@@ -327,7 +327,7 @@ function NanoBananaSettings(): React.ReactElement {
               <Button
                 size="sm"
                 variant="outline"
-                disabled={testing || !apiKey.trim()}
+                disabled={testing}
                 onClick={handleTest}
               >
                 {testing ? <><Loader2 size={14} className="animate-spin mr-1.5" />测试中...</> : '测试连接'}

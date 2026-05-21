@@ -76,6 +76,7 @@ import {
   createVoiceDictationWindow,
   toggleVoiceDictationWindow,
   destroyVoiceDictationWindow,
+  shouldPrecreateVoiceDictationWindow,
   shouldSuppressVoiceDictationActivate,
 } from './lib/voice-dictation-window'
 import { registerGlobalShortcut, unregisterAllGlobalShortcuts } from './lib/global-shortcut-service'
@@ -142,6 +143,55 @@ function installWindowsZoomInFallback(win: BrowserWindow): void {
     event.preventDefault()
     const currentZoomLevel = win.webContents.getZoomLevel()
     win.webContents.setZoomLevel(Math.min(currentZoomLevel + 0.5, 9))
+  })
+}
+
+function isTrustedMainWindowUrl(value?: string): boolean {
+  if (!value) return false
+
+  try {
+    const url = new URL(value)
+    if (url.protocol === 'file:') return true
+    if (!app.isPackaged && (url.hostname === 'localhost' || url.hostname === '127.0.0.1')) {
+      return true
+    }
+  } catch {
+    return false
+  }
+
+  return false
+}
+
+function installMainWindowMediaPermissions(win: BrowserWindow): void {
+  const mainSession = win.webContents.session
+
+  mainSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+    if (permission !== 'media') return false
+    if (details.mediaType === 'video') return false
+
+    return isTrustedMainWindowUrl(
+      details.requestingUrl ??
+      details.securityOrigin ??
+      webContents?.getURL() ??
+      requestingOrigin,
+    )
+  })
+
+  mainSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    if (permission !== 'media') {
+      callback(false)
+      return
+    }
+
+    const mediaDetails = details as Electron.MediaAccessPermissionRequest
+    const requestsVideo = mediaDetails.mediaTypes?.includes('video') ?? false
+    const trusted = isTrustedMainWindowUrl(
+      mediaDetails.requestingUrl ??
+      mediaDetails.securityOrigin ??
+      webContents?.getURL(),
+    )
+
+    callback(trusted && !requestsVideo)
   })
 }
 
@@ -254,21 +304,38 @@ function createWindow(): void {
     ...titleBarOptions,
   })
   installWindowsZoomInFallback(mainWindow)
+  installMainWindowMediaPermissions(mainWindow)
+
+  let hasShownMainWindow = false
+  const showMainWindowOnce = (): void => {
+    if (hasShownMainWindow || !mainWindow || mainWindow.isDestroyed()) {
+      return
+    }
+
+    hasShownMainWindow = true
+    ensureWindowOnScreen(mainWindow)
+    mainWindow.maximize()
+    mainWindow.show()
+    mainWindow.focus()
+  }
 
   // Load the renderer
   const isDev = !app.isPackaged
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173')
-    mainWindow.webContents.openDevTools()
+    if (process.env.PROMA_OPEN_DEVTOOLS === '1') {
+      mainWindow.webContents.openDevTools()
+    }
   } else {
     mainWindow.loadFile(join(__dirname, 'renderer', 'index.html'))
   }
 
   // 窗口就绪后最大化显示
-  mainWindow.once('ready-to-show', () => {
-    mainWindow?.maximize()
-    mainWindow?.show()
-  })
+  mainWindow.once('ready-to-show', showMainWindowOnce)
+  mainWindow.webContents.once('did-finish-load', showMainWindowOnce)
+  setTimeout(showMainWindowOnce, 1500)
+
+
 
   // 拦截页面内导航，外部链接用系统浏览器打开，防止 Electron 窗口被覆盖
   mainWindow.webContents.on('will-navigate', (event, url) => {
@@ -388,7 +455,7 @@ app.whenReady().then(async () => {
 
   // 预创建快速任务窗口（隐藏状态，首次唤起秒开）
   createQuickTaskWindow()
-  if (getSettings().voiceDictation?.enabled === true) {
+  if (shouldPrecreateVoiceDictationWindow()) {
     createVoiceDictationWindow()
   }
 

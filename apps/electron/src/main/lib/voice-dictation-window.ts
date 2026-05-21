@@ -9,6 +9,7 @@ import { join } from 'path'
 import { VOICE_DICTATION_IPC_CHANNELS } from '../../types'
 import { getSettings, updateSettings } from './settings-service'
 import { captureVoiceDictationTarget } from './text-output-service'
+import { getVoiceDictationSettings } from './voice-dictation-settings-service'
 
 let voiceDictationWindow: BrowserWindow | null = null
 let voiceDictationTargetIsProma = false
@@ -96,6 +97,13 @@ export function createVoiceDictationWindow(): void {
 }
 
 export function toggleVoiceDictationWindow(options: VoiceDictationToggleOptions = {}): void {
+  const provider = getVoiceDictationSettings().provider
+
+  if (!isDoubaoDictation(provider)) {
+    console.log('[语音输入] 当前使用 Chromium 原生语音识别，请通过输入框麦克风按钮触发')
+    return
+  }
+
   const win = voiceDictationWindow && !voiceDictationWindow.isDestroyed() ? voiceDictationWindow : null
 
   if (win?.isVisible()) {
@@ -121,6 +129,14 @@ export function toggleVoiceDictationWindow(options: VoiceDictationToggleOptions 
 
 function isVoiceDictationEnabled(): boolean {
   return getSettings().voiceDictation?.enabled === true
+}
+
+function isDoubaoDictation(provider = getVoiceDictationSettings().provider): boolean {
+  return provider === 'doubao'
+}
+
+export function shouldPrecreateVoiceDictationWindow(): boolean {
+  return isVoiceDictationEnabled() && isDoubaoDictation()
 }
 
 function installVoiceDictationMediaPermissions(win: BrowserWindow): void {

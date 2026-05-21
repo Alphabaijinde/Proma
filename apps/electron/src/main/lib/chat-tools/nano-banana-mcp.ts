@@ -9,8 +9,10 @@
 import { randomUUID } from 'node:crypto'
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs'
 import { extname, resolve, isAbsolute, join } from 'node:path'
-import { getToolState, getToolCredentials } from '../chat-tool-config'
+import { getToolState } from '../chat-tool-config'
 import { saveAttachment, isImageAttachment } from '../attachment-service'
+import { resolveNanoBananaCredentials } from './nano-banana-credentials'
+import { createCodexImageHandoffRequest } from './codex-image-handoff'
 
 // ===== Gemini API 类型（REST API 使用 camelCase） =====
 
@@ -50,11 +52,6 @@ interface GeminiResponse {
 // ===== 多轮对话历史（按 sessionId 隔离） =====
 
 const sessionHistory = new Map<string, GeminiContent[]>()
-
-// ===== 默认配置 =====
-
-const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com'
-const DEFAULT_MODEL = 'gemini-3.1-flash-image-preview'
 
 // ===== MCP 内容块类型 =====
 
@@ -189,9 +186,24 @@ async function callGeminiAndBuildResult(
   sessionId: string,
   options: { aspectRatio?: string; imageSize?: string; referenceImagePaths?: string[]; cwd?: string; numberOfImages?: number },
 ): Promise<McpToolResult> {
-  const credentials = getToolCredentials('nano-banana')
-  const baseUrl = credentials.baseUrl?.trim() || DEFAULT_BASE_URL
-  const model = credentials.model?.trim() || DEFAULT_MODEL
+  const credentials = resolveNanoBananaCredentials()
+  if (!credentials.apiKey) {
+    const handoff = createCodexImageHandoffRequest({
+      prompt,
+      aspectRatio: options.aspectRatio,
+      imageSize: options.imageSize,
+      numberOfImages: options.numberOfImages,
+      referenceImagePaths: options.referenceImagePaths,
+      cwd: options.cwd,
+      source: 'agent',
+    })
+    return {
+      content: [{ type: 'text' as const, text: handoff.message }],
+    }
+  }
+
+  const baseUrl = credentials.baseUrl
+  const model = credentials.model
 
   // 获取会话历史
   const history = sessionHistory.get(sessionId) ?? []
@@ -330,10 +342,10 @@ export async function injectNanoBananaMcpServer(
   sessionId: string,
   agentCwd?: string,
 ): Promise<void> {
-  // 检查工具是否启用且有凭据
+  // 工具开启后始终注入；缺少凭据时创建 Codex 文件交接请求。
   const toolState = getToolState('nano-banana')
-  const credentials = getToolCredentials('nano-banana')
-  if (!toolState.enabled || !credentials.apiKey) return
+  const credentials = resolveNanoBananaCredentials()
+  if (!toolState.enabled) return
 
   const { z } = await import('zod')
 
@@ -343,7 +355,7 @@ export async function injectNanoBananaMcpServer(
     tools: [
       sdk.tool(
         'generate_image',
-        'Generate or edit images using AI (Gemini Image Generation). Supports text-to-image, reference image editing, and iterative multi-turn editing. Use English prompts for best results. Previous generations are automatically used as context for subsequent calls. When the user uploads images (listed in <attached_files>) or mentions image files via @file:{path}, pass their absolute file paths via referenceImagePaths to use them as reference for editing.',
+        `Generate or edit images using AI. Supports text-to-image, reference image editing, and iterative multi-turn editing. Use English prompts for best results. Previous generations are automatically used as context for subsequent calls. When the user uploads images (listed in <attached_files>) or mentions image files via @file:{path}, pass their absolute file paths via referenceImagePaths to use them as reference for editing.${credentials.apiKey ? '' : ' Local image API credentials are not configured, so this tool will create a Codex file handoff request and return the expected output path(s). Tell the user the request is pending until Codex writes those files.'}`,
         {
           prompt: z.string().describe('Detailed description of the image to generate or the edits to make. English descriptions work best.'),
           referenceImagePaths: z.array(z.string()).optional().describe('File paths of reference images for editing. Can be absolute paths or relative paths (resolved from cwd). Extract from <attached_files> entries or @file:{path} mentions when the user wants to edit uploaded/referenced images.'),

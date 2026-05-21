@@ -20,6 +20,8 @@ import type {
   VoiceDictationStartInput,
   VoiceDictationStopInput,
   VoiceDictationTestResult,
+  ChromeWebSpeechStartInput,
+  ChromeWebSpeechStartResult,
   MicPermissionResult,
 } from '../types'
 import type {
@@ -1432,14 +1434,17 @@ export function registerIpcHandlers(): void {
       }
       // Nano Banana 生图工具测试
       if (toolId === 'nano-banana') {
-        const { getToolCredentials: getCredentials } = await import('./lib/chat-tool-config')
-        const credentials = getCredentials('nano-banana')
+        const {
+          getNanoBananaMissingKeyMessage,
+          resolveNanoBananaCredentials,
+        } = await import('./lib/chat-tools/nano-banana-credentials')
+        const credentials = resolveNanoBananaCredentials()
         if (!credentials.apiKey) {
-          return { success: false, message: '请先填写 Gemini API Key' }
+          return { success: false, message: getNanoBananaMissingKeyMessage(credentials) }
         }
         try {
-          const baseUrl = credentials.baseUrl?.trim() || 'https://generativelanguage.googleapis.com'
-          const model = credentials.model?.trim() || 'gemini-3.1-flash-image-preview'
+          const baseUrl = credentials.baseUrl
+          const model = credentials.model
           const url = `${baseUrl}/v1beta/models/${model}:generateContent?key=${credentials.apiKey}`
           const response = await fetch(url, {
             method: 'POST',
@@ -2672,6 +2677,9 @@ export function registerIpcHandlers(): void {
       const { getVoiceDictationSettings } = await import('./lib/voice-dictation-settings-service')
       const { testDoubaoAsrConnection } = await import('./lib/doubao-asr-service')
       const settings = { ...getVoiceDictationSettings(), ...(updates ?? {}) }
+      if (settings.provider === 'chromium-web-speech') {
+        return { success: true, message: 'Chromium 原生语音识别无需连接测试' }
+      }
       return testDoubaoAsrConnection(settings)
     }
   )
@@ -2686,13 +2694,25 @@ export function registerIpcHandlers(): void {
   )
 
   ipcMain.handle(
+    VOICE_DICTATION_IPC_CHANNELS.START_CHROME_WEB_SPEECH,
+    async (_, input: ChromeWebSpeechStartInput): Promise<ChromeWebSpeechStartResult> => {
+      const { startChromeWebSpeech } = await import('./lib/chrome-web-speech-service')
+      return startChromeWebSpeech(input)
+    }
+  )
+
+  ipcMain.handle(
     VOICE_DICTATION_IPC_CHANNELS.START,
     async (event, input: VoiceDictationStartInput): Promise<void> => {
       const { getVoiceDictationSettings } = await import('./lib/voice-dictation-settings-service')
       const { startDoubaoAsrSession } = await import('./lib/doubao-asr-service')
       const win = BrowserWindow.fromWebContents(event.sender)
       if (!win) throw new Error('语音输入窗口不存在')
-      await startDoubaoAsrSession(input.sessionId, getVoiceDictationSettings(), win)
+      const settings = getVoiceDictationSettings()
+      if (settings.provider === 'chromium-web-speech') {
+        return
+      }
+      await startDoubaoAsrSession(input.sessionId, settings, win)
     }
   )
 

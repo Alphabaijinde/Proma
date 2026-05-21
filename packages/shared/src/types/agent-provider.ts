@@ -7,6 +7,7 @@
  */
 
 import type { SDKMessage } from './agent'
+import type { ProviderType } from './channel'
 
 /** SDK 用户消息（队列消息注入用，匹配 SDK SDKUserMessage 结构） */
 export interface SDKUserMessageInput {
@@ -27,6 +28,8 @@ export interface SDKUserMessageInput {
 export interface AgentQueryInput {
   /** 会话 ID */
   sessionId: string
+  /** Agent provider used by the selected channel. */
+  provider?: ProviderType
   /** 用户 prompt（已包含上下文注入） */
   prompt: string
   /** 模型 ID */

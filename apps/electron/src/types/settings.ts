@@ -23,7 +23,7 @@ export interface NotificationSoundSettings {
 }
 
 /** 语音输入供应商 */
-export type VoiceDictationProvider = 'doubao'
+export type VoiceDictationProvider = 'chromium-web-speech' | 'doubao'
 
 /** 豆包 ASR 连接模式 */
 export type VoiceDictationEndpointMode = 'async' | 'duplex'
@@ -89,6 +89,17 @@ export interface VoiceDictationStateEvent {
 /** 开始语音输入会话参数 */
 export interface VoiceDictationStartInput {
   sessionId: string
+}
+
+/** Chrome Web Speech 桥接启动参数 */
+export interface ChromeWebSpeechStartInput {
+  language?: string
+}
+
+/** Chrome Web Speech 桥接启动结果 */
+export interface ChromeWebSpeechStartResult {
+  success: boolean
+  message: string
 }
 
 /** 语音音频分片 */
@@ -261,6 +272,8 @@ export const VOICE_DICTATION_IPC_CHANNELS = {
   TOGGLE: 'voice-dictation:toggle',
   /** 开始语音输入会话 */
   START: 'voice-dictation:start',
+  /** 通过系统 Chrome 启动 Web Speech 桥接 */
+  START_CHROME_WEB_SPEECH: 'voice-dictation:start-chrome-web-speech',
   /** 发送音频分片 */
   SEND_AUDIO: 'voice-dictation:send-audio',
   /** 停止语音输入会话 */

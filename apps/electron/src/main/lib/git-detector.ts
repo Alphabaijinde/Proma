@@ -6,6 +6,7 @@
 
 import { execSync, spawnSync } from 'child_process'
 import { existsSync } from 'fs'
+import { dirname, join } from 'path'
 import type { GitRuntimeStatus, GitRepoStatus } from '@proma/shared'
 
 /**
@@ -23,10 +24,15 @@ function findGitPath(): string | null {
       timeout: 5000,
     })
 
-    const gitPath = result.trim().split('\n')[0]
+    const gitPaths = result
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
 
-    if (gitPath && existsSync(gitPath)) {
-      return gitPath
+    for (const gitPath of gitPaths) {
+      if (existsSync(gitPath) && getGitVersion(gitPath)) {
+        return gitPath
+      }
     }
   } catch {
     // Git 未安装
@@ -44,6 +50,35 @@ function findGitPath(): string | null {
       if (existsSync(path)) {
         return path
       }
+    }
+
+    try {
+      const bashResult = execSync('where bash', {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 5000,
+      })
+
+      const bashPaths = bashResult
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+
+      for (const bashPath of bashPaths) {
+        if (!existsSync(bashPath)) continue
+        const gitRoot = dirname(dirname(bashPath))
+        const candidates = [
+          join(gitRoot, 'cmd', 'git.exe'),
+          join(gitRoot, 'bin', 'git.exe'),
+        ]
+        for (const gitPath of candidates) {
+          if (existsSync(gitPath) && getGitVersion(gitPath)) {
+            return gitPath
+          }
+        }
+      }
+    } catch {
+      // Git Bash 未在 PATH 中
     }
   }
 

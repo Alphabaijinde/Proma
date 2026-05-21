@@ -9,8 +9,9 @@
 import type { ToolCall, ToolResult, ToolDefinition } from '@proma/core'
 import type { ChatToolMeta, FileAttachment } from '@proma/shared'
 import { randomUUID } from 'node:crypto'
-import { getToolCredentials } from '../chat-tool-config'
 import { saveAttachment, readAttachmentAsBase64, isImageAttachment } from '../attachment-service'
+import { resolveNanoBananaCredentials } from './nano-banana-credentials'
+import { createCodexImageHandoffRequest } from './codex-image-handoff'
 
 // ===== Gemini API 类型（REST API 使用 camelCase） =====
 
@@ -65,11 +66,6 @@ export interface NanoBananaContext {
   /** 前一轮助手消息的附件 */
   previousAssistantAttachments?: FileAttachment[]
 }
-
-// ===== 默认配置 =====
-
-const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com'
-const DEFAULT_MODEL = 'gemini-3.1-flash-image-preview'
 
 // ===== 工具元数据 =====
 
@@ -148,11 +144,12 @@ export const NANO_BANANA_TOOL_DEFINITIONS: ToolDefinition[] = [
 // ===== 可用性检查 =====
 
 /**
- * 检查 Nano Banana 工具是否可用（API Key 已配置）
+ * 检查 Nano Banana 工具是否可用。
+ *
+ * 没有图片 API Key 时仍可用：工具会创建 Codex 文件交接请求。
  */
 export function isNanoBananaAvailable(): boolean {
-  const credentials = getToolCredentials('nano-banana')
-  return !!credentials.apiKey
+  return true
 }
 
 // ===== 工具执行 =====
@@ -272,15 +269,7 @@ export async function executeNanoBananaTool(
   toolCall: ToolCall,
   context: NanoBananaContext,
 ): Promise<ToolResult> {
-  const credentials = getToolCredentials('nano-banana')
-
-  if (!credentials.apiKey) {
-    return {
-      toolCallId: toolCall.id,
-      content: 'Nano Banana 未配置 API Key',
-      isError: true,
-    }
-  }
+  const credentials = resolveNanoBananaCredentials()
 
   try {
     const prompt = toolCall.arguments.prompt as string
@@ -299,8 +288,22 @@ export async function executeNanoBananaTool(
       }
     }
 
-    const baseUrl = credentials.baseUrl?.trim() || DEFAULT_BASE_URL
-    const model = credentials.model?.trim() || DEFAULT_MODEL
+    if (!credentials.apiKey) {
+      const handoff = createCodexImageHandoffRequest({
+        prompt,
+        aspectRatio,
+        imageSize,
+        numberOfImages,
+        source: 'chat',
+      })
+      return {
+        toolCallId: toolCall.id,
+        content: handoff.message,
+      }
+    }
+
+    const baseUrl = credentials.baseUrl
+    const model = credentials.model
 
     // 收集参考图
     const referenceImageParts = useReferenceImages ? collectReferenceImages(context) : []

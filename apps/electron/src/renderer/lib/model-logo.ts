@@ -239,6 +239,7 @@ const PROVIDER_LOGO_MAP: Record<ProviderType, string> = {
   minimax: MiniMaxLogo,
   doubao: DoubaoLogo,
   qwen: QwenLogo,
+  'codex-cli': OpenAILogo,
   custom: DefaultLogo,
 }
 

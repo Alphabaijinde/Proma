@@ -339,7 +339,7 @@ export async function startDoubaoAsrSession(
   win: BrowserWindow,
 ): Promise<void> {
   if (!settings.appId || !settings.accessToken || !settings.resourceId) {
-    throw new Error('请先填写豆包 ASR 凭证')
+    throw new Error('请先在设置 > 语音输入中填写 APP ID、Access Token 和 Resource ID')
   }
 
   await stopDoubaoAsrSession(sessionId)

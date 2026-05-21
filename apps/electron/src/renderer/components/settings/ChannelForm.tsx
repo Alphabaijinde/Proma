@@ -70,7 +70,7 @@ interface ChannelFormProps {
 }
 
 /** 所有可选供应商 */
-const PROVIDER_OPTIONS: ProviderType[] = ['anthropic', 'openai', 'deepseek', 'google', 'kimi-api', 'kimi-coding', 'zhipu', 'minimax', 'doubao', 'qwen', 'custom']
+const PROVIDER_OPTIONS: ProviderType[] = ['anthropic', 'openai', 'deepseek', 'google', 'kimi-api', 'kimi-coding', 'zhipu', 'minimax', 'doubao', 'qwen', 'codex-cli', 'custom']
 
 /** 供应商选项（用于 SettingsSelect） */
 const PROVIDER_SELECT_OPTIONS = PROVIDER_OPTIONS.map((p) => ({
@@ -90,6 +90,7 @@ const PROVIDER_CHAT_PATHS: Record<ProviderType, string> = {
   minimax: '/v1/messages',
   doubao: '/chat/completions',
   qwen: '/chat/completions',
+  'codex-cli': '',
   custom: '/chat/completions',
 }
 
@@ -99,6 +100,8 @@ const PROVIDER_CHAT_PATHS: Record<ProviderType, string> = {
  * Anthropic 特殊处理：如果 baseUrl 已包含 /v1，则不重复添加。
  */
 function buildPreviewUrl(baseUrl: string, provider: ProviderType): string {
+  if (provider === 'codex-cli') return 'codex exec'
+
   let trimmed = baseUrl.trim().replace(/\/+$/, '')
 
   if (provider === 'anthropic' || provider === 'deepseek' || provider === 'kimi-api' || provider === 'kimi-coding' || provider === 'minimax') {
@@ -165,6 +168,10 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
   const [fetchResult, setFetchResult] = React.useState<FetchModelsResult | null>(null)
   const [apiKeyLoaded, setApiKeyLoaded] = React.useState(false)
   const [showExitDialog, setShowExitDialog] = React.useState(false)
+  const isCodexCli = provider === 'codex-cli'
+  const canSubmit = name.trim() !== '' && (isCodexCli || apiKey.trim() !== '')
+  const canTest = isCodexCli || (apiKey.trim() !== '' && baseUrl.trim() !== '')
+  const canFetchModels = isCodexCli || (apiKey.trim() !== '' && baseUrl.trim() !== '')
 
   const setChannelFormDirty = useSetAtom(channelFormDirtyAtom)
   const lastAgentEligibleRef = React.useRef(channel ? isAgentEligibleChannel(channel) : false)
@@ -281,6 +288,10 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
         setModels([
           { id: 'MiniMax-M2.7', name: 'MiniMax-M2.7', enabled: true },
         ])
+      } else if (p === 'codex-cli') {
+        setModels([
+          { id: 'gpt-5.5', name: 'GPT-5.5', enabled: true },
+        ])
       }
     }
   }
@@ -314,7 +325,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
 
   /** 从供应商 API 拉取可用模型列表 */
   const handleFetchModels = async (): Promise<void> => {
-    if (!apiKey.trim() || !baseUrl.trim()) return
+    if (!canFetchModels) return
 
     setFetchingModels(true)
     setFetchResult(null)
@@ -347,7 +358,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
 
   /** 测试连接（直接使用表单当前值，无需先保存） */
   const handleTest = async (): Promise<void> => {
-    if (!apiKey.trim() || !baseUrl.trim()) return
+    if (!canTest) return
 
     setTesting(true)
     setTestResult(null)
@@ -368,7 +379,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
 
   /** 执行创建渠道 */
   const doCreate = React.useCallback(async (): Promise<Channel | null> => {
-    if (!name.trim() || !apiKey.trim()) return null
+    if (!canSubmit) return null
 
     setSaving(true)
     try {
@@ -376,7 +387,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
         name,
         provider,
         baseUrl,
-        apiKey,
+        apiKey: isCodexCli ? '' : apiKey,
         models,
         enabled,
       }
@@ -393,7 +404,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     } finally {
       setSaving(false)
     }
-  }, [name, provider, baseUrl, apiKey, models, enabled, onAgentEligibilityChange])
+  }, [name, provider, baseUrl, apiKey, models, enabled, onAgentEligibilityChange, canSubmit, isCodexCli])
 
   /** 创建渠道（仅新建模式） */
   const handleCreate = async (): Promise<void> => {
@@ -485,7 +496,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
           <Button
             size="sm"
             onClick={handleCreate}
-            disabled={saving || !name.trim() || !apiKey.trim()}
+            disabled={saving || !canSubmit}
           >
             {saving && <Loader2 size={14} className="animate-spin" />}
             <span>创建</span>
@@ -526,7 +537,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
                 size="sm"
                 type="button"
                 onClick={handleTest}
-                disabled={testing || !apiKey.trim() || !baseUrl.trim()}
+                disabled={testing || !canTest}
                 className="h-7 text-xs"
               >
                 {testing ? (
@@ -542,8 +553,8 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
                 type={showApiKey ? 'text' : 'password'}
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder={isEdit ? '留空则不更新' : '输入 API Key'}
-                required={!isEdit}
+                placeholder={isCodexCli ? 'Codex CLI 使用本机登录状态' : (isEdit ? '留空则不更新' : '输入 API Key')}
+                required={!isEdit && !isCodexCli}
                 className="pr-10"
               />
               <button
@@ -622,7 +633,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
             size="sm"
             type="button"
             onClick={handleFetchModels}
-            disabled={fetchingModels || !apiKey.trim() || !baseUrl.trim()}
+            disabled={fetchingModels || !canFetchModels}
             className="h-7 text-xs"
           >
             {fetchingModels ? (
@@ -767,7 +778,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
             <AlertDialogCancel onClick={handleDiscard}>放弃编辑</AlertDialogCancel>
             <AlertDialogAction
               onClick={handleSaveAndClose}
-              disabled={saving || !name.trim() || !apiKey.trim()}
+              disabled={saving || !canSubmit}
             >
               {saving ? <><Loader2 size={14} className="animate-spin" /> 保存中...</> : '保存并关闭'}
             </AlertDialogAction>

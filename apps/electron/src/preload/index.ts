@@ -102,6 +102,8 @@ import type {
 import type {
   UserProfile,
   AppSettings,
+  ChromeWebSpeechStartInput,
+  ChromeWebSpeechStartResult,
   QuickTaskSubmitInput,
   QuickTaskOpenSessionData,
   VoiceDictationAudioChunkInput,
@@ -809,6 +811,8 @@ export interface ElectronAPI {
   testVoiceDictationConnection: (updates?: VoiceDictationSettingsUpdate) => Promise<VoiceDictationTestResult>
   /** 唤起或停止语音输入浮窗 */
   toggleVoiceDictation: () => Promise<void>
+  /** 使用系统 Chrome 启动 Web Speech 桥接 */
+  startChromeWebSpeech: (input: ChromeWebSpeechStartInput) => Promise<ChromeWebSpeechStartResult>
   /** 开始语音输入会话 */
   startVoiceDictation: (input: VoiceDictationStartInput) => Promise<void>
   /** 发送语音音频分片 */
@@ -1835,6 +1839,10 @@ const electronAPI: ElectronAPI = {
 
   toggleVoiceDictation: () => {
     return ipcRenderer.invoke(VOICE_DICTATION_IPC_CHANNELS.TOGGLE)
+  },
+
+  startChromeWebSpeech: (input: ChromeWebSpeechStartInput) => {
+    return ipcRenderer.invoke(VOICE_DICTATION_IPC_CHANNELS.START_CHROME_WEB_SPEECH, input)
   },
 
   startVoiceDictation: (input: VoiceDictationStartInput) => {

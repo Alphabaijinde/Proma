@@ -17,6 +17,12 @@ import {
 } from './primitives'
 import type { VoiceDictationSettings, MicPermissionResult } from '../../../types'
 
+const PROVIDER_OPTIONS = [
+  { value: 'chromium-web-speech', label: 'Electron 内置 Chromium' },
+  { value: 'doubao', label: '豆包流式 ASR' },
+]
+const VOICE_DICTATION_SETTINGS_UPDATED_EVENT = 'proma:voice-dictation-settings-updated'
+
 const ENDPOINT_OPTIONS = [
   { value: 'async', label: '双向流式优化版' },
   { value: 'duplex', label: '双向流式标准版' },
@@ -85,12 +91,13 @@ export function VoiceInputSettings(): React.ReactElement {
 
   const update = React.useCallback(async (updates: Partial<VoiceDictationSettings>) => {
     if (!settings) return
-    const optimistic = { ...settings, ...updates, provider: 'doubao' as const }
+    const optimistic = { ...settings, ...updates }
     setSettings(optimistic)
     setSaving(true)
     try {
       const saved = await window.electronAPI.updateVoiceDictationSettings(optimistic)
       setSettings(saved)
+      window.dispatchEvent(new CustomEvent(VOICE_DICTATION_SETTINGS_UPDATED_EVENT, { detail: saved }))
       window.electronAPI.reregisterGlobalShortcuts().catch(console.error)
     } catch (error) {
       console.error('[语音输入] 保存设置失败:', error)
@@ -127,12 +134,23 @@ export function VoiceInputSettings(): React.ReactElement {
     )
   }
 
+  const isChromiumProvider = settings.provider === 'chromium-web-speech'
+  const isDoubaoProvider = settings.provider === 'doubao'
+  const usesBrowserMicrophone = isChromiumProvider || isDoubaoProvider
+
   return (
     <div className="space-y-6">
       <SettingsSection
-        title="豆包流式语音输入"
-        description="通过全局快捷键唤起浮窗，实时识别语音，停止后写入 Proma 输入框或当前光标位置。"
+        title="语音输入"
+        description={
+          isDoubaoProvider
+            ? '通过全局快捷键唤起浮窗，实时识别语音，停止后写入 Proma 输入框或当前光标位置。'
+            : isChromiumProvider
+            ? '使用 Proma 内置 Electron/Chromium 的 Web Speech API，不调用系统安装的 Google Chrome。'
+            : ''
+        }
         action={
+          isDoubaoProvider ? (
           <Button
             variant="outline"
             size="sm"
@@ -142,31 +160,42 @@ export function VoiceInputSettings(): React.ReactElement {
             {testing ? <Loader2 className="mr-1.5 size-3.5 animate-spin" /> : <TestTube2 className="mr-1.5 size-3.5" />}
             测试连接
           </Button>
+          ) : undefined
         }
       >
-        <div className="rounded-lg bg-muted/55 px-4 py-3 text-sm text-muted-foreground shadow-sm">
-          <div className="mb-1.5 font-medium text-foreground">配置方式</div>
-          <div className="space-y-1 leading-relaxed">
-            <p>
-              打开
-              <a
-                href={VOLCENGINE_SPEECH_SERVICE_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="mx-1 inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
-              >
-                火山引擎语音服务控制台
-                <ExternalLink className="size-3" />
-              </a>
-              ，选择旧版服务界面。
-            </p>
-            <p>找到“豆包流式语音识别模型2.0”类目，选择已申请对应权限的应用。</p>
-            <p>在页面下方对照填写 APP ID、Access Token 和 Resource ID，然后点击“测试连接”。</p>
+        {isChromiumProvider ? (
+          <div className="rounded-lg bg-muted/55 px-4 py-3 text-sm text-muted-foreground shadow-sm">
+            <div className="mb-1.5 font-medium text-foreground">Electron 内置 Chromium</div>
+            <div className="space-y-1 leading-relaxed">
+              <p>这是早期 Proma 的直接点击麦克风方案，使用 Proma 自带的 Electron/Chromium，不是系统安装的 Google Chrome。</p>
+              <p>不需要豆包凭证；识别能力由当前 Electron/Chromium 运行时和系统网络环境决定。</p>
+            </div>
           </div>
-        </div>
+        ) : isDoubaoProvider ? (
+          <div className="rounded-lg bg-muted/55 px-4 py-3 text-sm text-muted-foreground shadow-sm">
+            <div className="mb-1.5 font-medium text-foreground">配置方式</div>
+            <div className="space-y-1 leading-relaxed">
+              <p>
+                打开
+                <a
+                  href={VOLCENGINE_SPEECH_SERVICE_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mx-1 inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
+                >
+                  火山引擎语音服务控制台
+                  <ExternalLink className="size-3" />
+                </a>
+                ，选择旧版服务界面。
+              </p>
+              <p>找到“豆包流式语音识别模型2.0”类目，选择已申请对应权限的应用。</p>
+              <p>在页面下方对照填写 APP ID、Access Token 和 Resource ID，然后点击“测试连接”。</p>
+            </div>
+          </div>
+        ) : null}
 
         {/* 麦克风权限状态 */}
-        {micPermission && (
+        {usesBrowserMicrophone && micPermission && (
           <div className="rounded-lg border px-4 py-3 text-sm">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
@@ -216,60 +245,77 @@ export function VoiceInputSettings(): React.ReactElement {
         <SettingsCard>
           <SettingsToggle
             label="启用语音输入"
-            description="启用后可使用 Ctrl+～ 打开语音输入浮窗，再按一次停止。"
+            description={
+              isDoubaoProvider
+                ? '启用后可使用 Ctrl+～ 打开语音输入浮窗，再按一次停止。'
+                : isChromiumProvider
+                ? '启用后可点击输入框旁的麦克风按钮，使用 Electron 内置 Chromium 识别。'
+                : ''
+            }
             checked={settings.enabled}
             onCheckedChange={(enabled) => update({ enabled })}
           />
-          <SettingsInput
-            label="豆包 APP ID"
-            description="对应 X-Api-App-Key，请填写火山引擎控制台中的 APP ID。"
-            value={settings.appId}
-            onChange={(appId) => update({ appId })}
-            placeholder="请输入 APP ID"
-          />
-          <SettingsSecretInput
-            label="豆包 Access Token"
-            description="对应 X-Api-Access-Key，保存时会加密。"
-            value={settings.accessToken}
-            onChange={(accessToken) => update({ accessToken })}
-            placeholder="请输入 Access Token"
-          />
-          <SettingsInput
-            label="Resource ID"
-            description="默认使用豆包语音识别模型 2.0 小时版。"
-            value={settings.resourceId}
-            onChange={(resourceId) => update({ resourceId })}
-            placeholder="volc.seedasr.sauc.duration"
-          />
           <SettingsSelect
-            label="连接模式"
-            description="优化版只在结果变化时返回新包，实时体验更好。"
-            value={settings.endpointMode}
-            onValueChange={(endpointMode) => update({ endpointMode: endpointMode as VoiceDictationSettings['endpointMode'] })}
-            options={ENDPOINT_OPTIONS}
+            label="识别方式"
+            description="Electron 内置 Chromium 是早期直接麦克风实现；豆包 ASR 支持浮窗实时转写。"
+            value={settings.provider}
+            onValueChange={(provider) => update({ provider: provider as VoiceDictationSettings['provider'] })}
+            options={PROVIDER_OPTIONS}
           />
-          <SettingsSelect
-            label="识别语言"
-            description="自动识别适合中英文和方言混合输入。"
-            value={settings.language || 'auto'}
-            onValueChange={(language) => update({ language: language === 'auto' ? '' : language })}
-            options={LANGUAGE_OPTIONS}
-          />
-          <SettingsTextarea
-            label="自定义热词"
-            description="每行或逗号分隔一个词，会在本次识别请求中直传给豆包，用于改善产品名、技术词和人名识别。"
-            value={settings.customHotwords}
-            onChange={(customHotwords) => update({ customHotwords })}
-            placeholder={"Proma\nJotai\nShadcnUI\nClaude Code"}
-            minHeight={112}
-          />
-          <SettingsSelect
-            label="输出方式"
-            description="默认写入当前光标位置；如果唤起时 Proma 是当前激活窗口，会写入当前 Chat 或 Agent 输入框。自动粘贴失败时会保留到剪贴板。"
-            value={settings.outputMode}
-            onValueChange={(outputMode) => update({ outputMode: outputMode as VoiceDictationSettings['outputMode'] })}
-            options={OUTPUT_OPTIONS}
-          />
+          {isDoubaoProvider && (
+            <>
+              <SettingsInput
+                label="豆包 APP ID"
+                description="对应 X-Api-App-Key，请填写火山引擎控制台中的 APP ID。"
+                value={settings.appId}
+                onChange={(appId) => update({ appId })}
+                placeholder="请输入 APP ID"
+              />
+              <SettingsSecretInput
+                label="豆包 Access Token"
+                description="对应 X-Api-Access-Key，保存时会加密。"
+                value={settings.accessToken}
+                onChange={(accessToken) => update({ accessToken })}
+                placeholder="请输入 Access Token"
+              />
+              <SettingsInput
+                label="Resource ID"
+                description="默认使用豆包语音识别模型 2.0 小时版。"
+                value={settings.resourceId}
+                onChange={(resourceId) => update({ resourceId })}
+                placeholder="volc.seedasr.sauc.duration"
+              />
+              <SettingsSelect
+                label="连接模式"
+                description="优化版只在结果变化时返回新包，实时体验更好。"
+                value={settings.endpointMode}
+                onValueChange={(endpointMode) => update({ endpointMode: endpointMode as VoiceDictationSettings['endpointMode'] })}
+                options={ENDPOINT_OPTIONS}
+              />
+              <SettingsSelect
+                label="识别语言"
+                description="自动识别适合中英文和方言混合输入。"
+                value={settings.language || 'auto'}
+                onValueChange={(language) => update({ language: language === 'auto' ? '' : language })}
+                options={LANGUAGE_OPTIONS}
+              />
+              <SettingsTextarea
+                label="自定义热词"
+                description="每行或逗号分隔一个词，会在本次识别请求中直传给豆包，用于改善产品名、技术词和人名识别。"
+                value={settings.customHotwords}
+                onChange={(customHotwords) => update({ customHotwords })}
+                placeholder={"Proma\nJotai\nShadcnUI\nClaude Code"}
+                minHeight={112}
+              />
+              <SettingsSelect
+                label="输出方式"
+                description="默认写入当前光标位置；如果唤起时 Proma 是当前激活窗口，会写入当前 Chat 或 Agent 输入框。自动粘贴失败时会保留到剪贴板。"
+                value={settings.outputMode}
+                onValueChange={(outputMode) => update({ outputMode: outputMode as VoiceDictationSettings['outputMode'] })}
+                options={OUTPUT_OPTIONS}
+              />
+            </>
+          )}
         </SettingsCard>
       </SettingsSection>
 

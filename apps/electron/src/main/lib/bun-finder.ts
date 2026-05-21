@@ -124,13 +124,31 @@ export function getSystemBunPath(): string | null {
       timeout: 5000,
     })
 
-    const bunPath = result.trim().split('\n')[0]
+    const bunPaths = result
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
 
-    if (bunPath && existsSync(bunPath)) {
-      return bunPath
+    for (const bunPath of bunPaths) {
+      if (existsSync(bunPath) && validateBunExecutable(bunPath)) {
+        return bunPath
+      }
     }
   } catch {
     // 命令执行失败，Bun 未安装
+  }
+
+  if (process.platform === 'win32') {
+    const fallbackPaths = [
+      process.env.APPDATA ? join(process.env.APPDATA, 'npm', 'node_modules', 'bun', 'bin', 'bun.exe') : null,
+      process.env.USERPROFILE ? join(process.env.USERPROFILE, '.bun', 'bin', 'bun.exe') : null,
+    ]
+
+    for (const bunPath of fallbackPaths) {
+      if (bunPath && existsSync(bunPath) && validateBunExecutable(bunPath)) {
+        return bunPath
+      }
+    }
   }
 
   return null

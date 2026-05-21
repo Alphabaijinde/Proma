@@ -10,7 +10,7 @@ import { getSettings, updateSettings } from './settings-service'
 
 const DEFAULT_VOICE_DICTATION_SETTINGS: VoiceDictationSettings = {
   enabled: false,
-  provider: 'doubao',
+  provider: 'chromium-web-speech',
   appId: '',
   accessToken: '',
   resourceId: 'volc.seedasr.sauc.duration',
@@ -61,7 +61,7 @@ export function updateVoiceDictationSettings(
   const next: VoiceDictationSettings = {
     ...current,
     ...updates,
-    provider: 'doubao',
+    provider: updates.provider ?? current.provider,
   }
 
   updateSettings({
