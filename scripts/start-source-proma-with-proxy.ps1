@@ -13,7 +13,7 @@ chcp.com 65001 | Out-Null
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = (Resolve-Path (Join-Path $ScriptDir '..')).Path
 $LogDir = Join-Path $ProjectRoot 'logs'
-$ProxyScript = 'C:\Users\admin\azure_responses_proxy.py'
+$ProxyScript = Join-Path $ScriptDir 'azure-responses-proxy.py'
 $PythonExe = 'D:\Python\Python313\python.exe'
 $ProxyUrl = 'http://127.0.0.1:8787/health'
 $VitePort = 5173
