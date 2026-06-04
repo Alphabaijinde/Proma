@@ -37,8 +37,6 @@ import {
   Send,
   Server,
   Terminal,
-  UserMinus,
-  Users,
   Wrench,
   Zap,
 } from 'lucide-react'
@@ -62,8 +60,6 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   TaskUpdate: ListChecks,
   TaskGet: FileSearch,
   TaskList: List,
-  TeamCreate: Users,
-  TeamDelete: UserMinus,
   Agent: Bot,
   EnterPlanMode: Map,
   ExitPlanMode: MapPinOff,
@@ -71,6 +67,11 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   TaskOutput: Layers,
   TaskStop: OctagonX,
   AskUserQuestion: MessageCircleQuestion,
+  REPL: Terminal,
+  Workflow: GitBranch,
+  ScheduleWakeup: CalendarClock,
+  Monitor: Radio,
+  PushNotification: Send,
   CronCreate: CalendarClock,
   CronDelete: CalendarX,
   CronList: CalendarDays,
@@ -110,10 +111,8 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   TodoRead: '阅读待办',
   TaskCreate: '创建任务',
   TaskUpdate: '更新任务',
-  TaskGet: '加载任务',
+  TaskGet: '查看任务',
   TaskList: '任务列表',
-  TeamCreate: '创建 Agent Teams',
-  TeamDelete: '删除 Agent Teams',
   Agent: 'Agent',
   EnterPlanMode: '正在生成计划',
   ExitPlanMode: '正在退出计划',
@@ -121,6 +120,11 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   TaskOutput: '获取任务输出',
   TaskStop: '停止任务',
   AskUserQuestion: '等待用户输入',
+  REPL: '执行 REPL',
+  Workflow: '运行工作流',
+  ScheduleWakeup: '安排唤醒',
+  Monitor: '监控任务',
+  PushNotification: '发送通知',
   CronCreate: '创建定时任务',
   CronDelete: '删除定时任务',
   CronList: '列出定时任务',
@@ -265,8 +269,8 @@ export function getInputSummary(
     case 'Write': {
       const filePath = input.file_path
       if (typeof filePath === 'string') {
-        // 仅展示文件名，不展示完整路径
-        return filePath.split('/').pop() ?? filePath
+        // 仅展示文件名，不展示完整路径（兼容 Windows 反斜杠）
+        return filePath.split(/[/\\]/).pop() || filePath
       }
       return null
     }
@@ -274,7 +278,7 @@ export function getInputSummary(
     case 'NotebookEdit': {
       const notebookPath = input.notebook_path
       if (typeof notebookPath === 'string') {
-        return notebookPath.split('/').pop() ?? notebookPath
+        return notebookPath.split(/[/\\]/).pop() || notebookPath
       }
       return null
     }
@@ -285,17 +289,6 @@ export function getInputSummary(
         return `${todos.length} 项待办`
       }
       return null
-    }
-
-    case 'TeamCreate': {
-      const parts: string[] = []
-      if (typeof input.team_name === 'string') {
-        parts.push(input.team_name)
-      }
-      if (typeof input.description === 'string') {
-        parts.push(input.description)
-      }
-      return parts.length > 0 ? parts.join(' · ') : null
     }
 
     case 'Agent': {
@@ -333,6 +326,42 @@ export function getInputSummary(
           return first.question.length > 60 ? first.question.slice(0, 60) + '…' : first.question
         }
       }
+      return null
+    }
+
+    case 'REPL': {
+      const description = input.description
+      const code = input.code
+      if (typeof description === 'string' && description.trim()) return description
+      if (typeof code === 'string') return code.length > 60 ? code.slice(0, 60) + '…' : code
+      return null
+    }
+
+    case 'Workflow': {
+      const name = input.name
+      const scriptPath = input.scriptPath
+      if (typeof name === 'string') return name
+      if (typeof scriptPath === 'string') return scriptPath.split(/[/\\]/).pop() || scriptPath
+      return null
+    }
+
+    case 'ScheduleWakeup': {
+      const delaySeconds = input.delaySeconds
+      const reason = input.reason
+      if (typeof delaySeconds === 'number' && typeof reason === 'string') return `${delaySeconds}s · ${reason}`
+      if (typeof delaySeconds === 'number') return `${delaySeconds}s`
+      return null
+    }
+
+    case 'Monitor': {
+      const description = input.description
+      if (typeof description === 'string') return description.length > 60 ? description.slice(0, 60) + '…' : description
+      return null
+    }
+
+    case 'PushNotification': {
+      const message = input.message
+      if (typeof message === 'string') return message.length > 60 ? message.slice(0, 60) + '…' : message
       return null
     }
 
@@ -454,77 +483,4 @@ export function formatElapsed(seconds: number): string {
   const minutes = Math.floor(seconds / 60)
   const remainingSeconds = Math.floor(seconds % 60)
   return `${minutes}m ${remainingSeconds}s`
-}
-
-/** 文件扩展名到语言标识的映射 */
-const EXT_LANGUAGE_MAP: Record<string, string> = {
-  ts: 'typescript',
-  tsx: 'tsx',
-  js: 'javascript',
-  jsx: 'jsx',
-  py: 'python',
-  rb: 'ruby',
-  go: 'go',
-  rs: 'rust',
-  java: 'java',
-  kt: 'kotlin',
-  swift: 'swift',
-  c: 'c',
-  cpp: 'cpp',
-  h: 'c',
-  hpp: 'cpp',
-  cs: 'csharp',
-  php: 'php',
-  json: 'json',
-  jsonl: 'json',
-  yaml: 'yaml',
-  yml: 'yaml',
-  toml: 'toml',
-  xml: 'xml',
-  html: 'html',
-  htm: 'html',
-  css: 'css',
-  scss: 'scss',
-  less: 'less',
-  md: 'markdown',
-  mdx: 'mdx',
-  sql: 'sql',
-  sh: 'shellscript',
-  bash: 'shellscript',
-  zsh: 'shellscript',
-  fish: 'shellscript',
-  ps1: 'powershell',
-  dockerfile: 'dockerfile',
-  makefile: 'makefile',
-  lua: 'lua',
-  r: 'r',
-  scala: 'scala',
-  dart: 'dart',
-  vue: 'vue',
-  svelte: 'svelte',
-  graphql: 'graphql',
-  gql: 'graphql',
-  proto: 'protobuf',
-  env: 'shellscript',
-  ini: 'ini',
-  conf: 'ini',
-  cfg: 'ini',
-}
-
-/**
- * 根据文件路径推断语法高亮语言标识
- * 返回 Shiki 可识别的语言 ID，未知扩展名返回 'text'
- */
-export function inferLanguageFromPath(filePath: string): string {
-  const basename = filePath.split('/').pop() ?? filePath
-  // 处理无扩展名的特殊文件
-  const lowerBasename = basename.toLowerCase()
-  if (lowerBasename === 'dockerfile') return 'dockerfile'
-  if (lowerBasename === 'makefile' || lowerBasename === 'gnumakefile') return 'makefile'
-  if (lowerBasename.startsWith('.env')) return 'shellscript'
-
-  const dotIndex = basename.lastIndexOf('.')
-  if (dotIndex === -1) return 'text'
-  const ext = basename.slice(dotIndex + 1).toLowerCase()
-  return EXT_LANGUAGE_MAP[ext] ?? 'text'
 }

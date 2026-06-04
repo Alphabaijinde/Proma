@@ -7,34 +7,19 @@
  */
 
 import * as React from 'react'
-import { useAtom, useAtomValue } from 'jotai'
+import { useAtom, useAtomValue, useSetAtom } from 'jotai'
 import { Zap, Compass, Map as MapIcon } from 'lucide-react'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { agentPermissionModeMapAtom, agentDefaultPermissionModeAtom, sessionPersistedPermissionModeAtom, sessionExistsAtom } from '@/atoms/agent-atoms'
+import { Button } from '@/components/ui/button'
+import { agentPermissionModeMapAtom, agentDefaultPermissionModeAtom, sessionPersistedPermissionModeAtom, sessionExistsAtom, agentPlanModeSessionsAtom } from '@/atoms/agent-atoms'
 import type { PromaPermissionMode } from '@proma/shared'
-import { PROMA_PERMISSION_MODE_ORDER } from '@proma/shared'
+import { PROMA_PERMISSION_MODE_CONFIG, PROMA_PERMISSION_MODE_ORDER } from '@proma/shared'
+import { updatePlanModeSessionSet } from '@/lib/agent-plan-mode'
 
-/** 模式配置 */
-const MODE_CONFIG: Record<PromaPermissionMode, {
-  icon: React.ComponentType<{ className?: string }>
-  label: string
-  description: string
-}> = {
-  auto: {
-    icon: Compass,
-    label: '自动模式',
-    description: 'SDK 内置审批器自动判断，危险操作才需确认',
-  },
-  bypassPermissions: {
-    icon: Zap,
-    label: '完全自动',
-    description: '所有工具调用自动允许',
-  },
-  plan: {
-    icon: MapIcon,
-    label: '计划模式',
-    description: '仅规划不执行，查看工具使用计划',
-  },
+const MODE_ICONS: Record<PromaPermissionMode, React.ComponentType<{ className?: string }>> = {
+  auto: Compass,
+  bypassPermissions: Zap,
+  plan: MapIcon,
 }
 
 interface PermissionModeSelectorProps {
@@ -43,6 +28,7 @@ interface PermissionModeSelectorProps {
 
 export function PermissionModeSelector({ sessionId }: PermissionModeSelectorProps): React.ReactElement | null {
   const [modeMap, setModeMap] = useAtom(agentPermissionModeMapAtom)
+  const setPlanModeSessions = useSetAtom(agentPlanModeSessionsAtom)
   const defaultMode = useAtomValue(agentDefaultPermissionModeAtom)
   const persistedSessionMode = useAtomValue(sessionPersistedPermissionModeAtom(sessionId))
   const mode = modeMap.get(sessionId) ?? persistedSessionMode ?? defaultMode
@@ -76,6 +62,9 @@ export function PermissionModeSelector({ sessionId }: PermissionModeSelectorProp
       next.set(sessionId, nextMode)
       return next
     })
+    setPlanModeSessions((prev: Set<string>) =>
+      updatePlanModeSessionSet(prev, sessionId, nextMode === 'plan')
+    )
 
     // 热切换运行中的当前 session；失败时回滚 modeMap 保持 UI/后端一致
     try {
@@ -87,27 +76,32 @@ export function PermissionModeSelector({ sessionId }: PermissionModeSelectorProp
         next.set(sessionId, prevMode)
         return next
       })
+      setPlanModeSessions((prev: Set<string>) =>
+        updatePlanModeSessionSet(prev, sessionId, prevMode === 'plan')
+      )
     }
-  }, [mode, sessionId, setModeMap])
+  }, [mode, sessionId, setModeMap, setPlanModeSessions])
 
-  const config = MODE_CONFIG[mode]
-  const Icon = config.icon
+  const config = PROMA_PERMISSION_MODE_CONFIG[mode]
+  const Icon = MODE_ICONS[mode]
 
   return (
     <TooltipProvider delayDuration={300}>
       <Tooltip>
         <TooltipTrigger asChild>
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            size="icon"
+            aria-label={config.label}
             onClick={() => { cycleMode(); requestAnimationFrame(() => document.querySelector<HTMLElement>('.ProseMirror')?.focus()) }}
-            className="flex items-center gap-1 px-1.5 py-1 rounded text-xs font-medium transition-colors text-muted-foreground hover:text-foreground"
+            className="size-[36px] rounded-full text-foreground/60 hover:text-foreground"
           >
-            <Icon className="size-3.5" />
-            <span className="hidden sm:inline">{config.label}</span>
-          </button>
+            <Icon className="size-5" />
+          </Button>
         </TooltipTrigger>
         <TooltipContent side="bottom" className="max-w-[200px]">
-          <p className="font-medium">{config.label}模式</p>
+          <p className="font-medium">{config.label}</p>
           <p className="text-xs text-muted-foreground mt-0.5">{config.description}</p>
           <p className="text-xs text-muted-foreground mt-1">点击切换模式</p>
         </TooltipContent>

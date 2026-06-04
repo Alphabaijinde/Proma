@@ -10,6 +10,7 @@
  */
 export type ProviderType =
   | 'anthropic'
+  | 'anthropic-compatible'
   | 'openai'
   | 'deepseek'
   | 'google'
@@ -20,6 +21,8 @@ export type ProviderType =
   | 'doubao'
   | 'qwen'
   | 'codex-cli'
+  | 'xiaomi'
+  | 'xiaomi-token-plan'
   | 'custom'
 
 /**
@@ -27,6 +30,7 @@ export type ProviderType =
  */
 export const PROVIDER_DEFAULT_URLS: Record<ProviderType, string> = {
   anthropic: 'https://api.anthropic.com',
+  'anthropic-compatible': '',
   openai: 'https://api.openai.com/v1',
   deepseek: 'https://api.deepseek.com/anthropic',
   google: 'https://generativelanguage.googleapis.com',
@@ -37,6 +41,8 @@ export const PROVIDER_DEFAULT_URLS: Record<ProviderType, string> = {
   doubao: 'https://ark.cn-beijing.volces.com/api/v3',
   qwen: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
   'codex-cli': '',
+  xiaomi: 'https://api.xiaomimimo.com/anthropic',
+  'xiaomi-token-plan': 'https://token-plan-cn.xiaomimimo.com/anthropic',
   custom: '',
 }
 
@@ -45,6 +51,7 @@ export const PROVIDER_DEFAULT_URLS: Record<ProviderType, string> = {
  */
 export const PROVIDER_LABELS: Record<ProviderType, string> = {
   anthropic: 'Anthropic',
+  'anthropic-compatible': 'Anthropic 兼容格式',
   openai: 'OpenAI',
   deepseek: 'DeepSeek',
   google: 'Google',
@@ -55,6 +62,8 @@ export const PROVIDER_LABELS: Record<ProviderType, string> = {
   doubao: '豆包',
   qwen: '通义千问',
   'codex-cli': 'Codex CLI',
+  xiaomi: '小米 MiMo (API)',
+  'xiaomi-token-plan': '小米 MiMo Token Plan',
   custom: 'OpenAI 兼容格式',
 }
 
@@ -66,11 +75,14 @@ export const PROVIDER_LABELS: Record<ProviderType, string> = {
  */
 export const AGENT_COMPATIBLE_PROVIDERS: ReadonlySet<ProviderType> = new Set<ProviderType>([
   'anthropic',
+  'anthropic-compatible',
   'deepseek',
   'kimi-api',
   'kimi-coding',
   'minimax',
   'codex-cli',
+  'xiaomi',
+  'xiaomi-token-plan',
 ])
 
 /**

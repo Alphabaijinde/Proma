@@ -21,9 +21,12 @@ import { useAtomValue } from 'jotai'
 import { thinkingExpandedAtom } from '@/atoms/chat-atoms'
 import { cn } from '@/lib/utils'
 import { MessageResponse } from '@/components/ai-elements/message'
-import { getToolIcon } from './tool-utils'
+import { getToolIcon, extractFilePath } from './tool-utils'
 import { getToolPhrase } from './tool-phrase'
 import { ToolResultRenderer } from './tool-result-renderers'
+import { PreviewOpenButton } from './tool-result-renderers/preview-open-button'
+import { getTaskGetStatusLabel, parseTaskGetResult, type ParsedTaskGetResult } from './tool-result-renderers/task-get-result'
+import { parseTaskListResult, type ParsedTaskListItem } from './tool-result-renderers/task-list-result'
 import { formatDuration } from './AgentMessages'
 import type {
   SDKContentBlock,
@@ -196,6 +199,8 @@ export interface ContentBlockProps {
   allMessages: SDKMessage[]
   /** 相对路径解析基准（文件链接用） */
   basePath?: string
+  /** 多个可解析相对路径的基准目录 */
+  basePaths?: string[]
   /** 是否启用入场动画 */
   animate?: boolean
   /** 在父级中的索引（用于动画延迟） */
@@ -256,20 +261,63 @@ function PromptRow({ prompt, dimmed = false }: { prompt: string; dimmed?: boolea
 
 // ===== 工具短语 diff 着色 =====
 
-/** 将 displayLabel 中的 +N 染绿、-N 染红（仅对 Edit/Write 工具生效，避免 `head -5` 等命令参数被误染） */
-function renderLabelWithDiffColors(label: string, toolName: string): React.ReactNode {
-  if (toolName !== 'Edit' && toolName !== 'Write') return label
-  const parts = label.split(/((?:^|(?<=\s))[+-]\d+)/g)
-  if (parts.length === 1) return label
-  return parts.map((part, i) => {
-    if (/^\+\d+$/.test(part)) {
-      return <span key={i} className="text-green-500">{part}</span>
-    }
-    if (/^-\d+$/.test(part)) {
-      return <span key={i} className="text-red-500">{part}</span>
-    }
-    return part
-  })
+function TaskGetCollapsedSummary({ task }: { task: ParsedTaskGetResult }): React.ReactElement {
+  const blockPreview = task.blocks.length > 0
+    ? `${task.blocks[0]}${task.blocks.length > 1 ? ` +${task.blocks.length - 1}` : ''}`
+    : undefined
+
+  return (
+    <>
+      {task.subject && (
+        <>
+          <span className="shrink-0 text-muted-foreground/35">·</span>
+          <span className="min-w-0 truncate text-[14px] font-medium text-foreground/75">
+            {task.subject}
+          </span>
+        </>
+      )}
+      {task.description && (
+        <span className="hidden min-w-0 truncate text-[13px] text-muted-foreground/60 sm:inline">
+          {task.description}
+        </span>
+      )}
+      {task.status && (
+        <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary">
+          {getTaskGetStatusLabel(task.status)}
+        </span>
+      )}
+      {blockPreview && (
+        <span className="shrink-0 rounded-sm bg-muted/50 px-1.5 py-0.5 text-[11px] text-muted-foreground/70">
+          关联 {blockPreview}
+        </span>
+      )}
+    </>
+  )
+}
+
+function TaskListCollapsedSummary({ tasks }: { tasks: ParsedTaskListItem[] }): React.ReactElement {
+  const completedCount = tasks.filter((task) => task.status === 'completed').length
+  const activeCount = tasks.filter((task) => task.status === 'in_progress').length
+  const pendingCount = tasks.filter((task) => task.status === 'pending').length
+
+  return (
+    <>
+      <span className="shrink-0 text-muted-foreground/35">·</span>
+      <span className="shrink-0 rounded-full bg-muted/50 px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground/75">
+        {completedCount}/{tasks.length} 已完成
+      </span>
+      {activeCount > 0 && (
+        <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary">
+          {activeCount} 进行中
+        </span>
+      )}
+      {pendingCount > 0 && (
+        <span className="hidden shrink-0 rounded-full bg-muted/40 px-1.5 py-0.5 text-[11px] text-muted-foreground/65 sm:inline">
+          {pendingCount} 待处理
+        </span>
+      )}
+    </>
+  )
 }
 
 // ===== 工具调用块 =====
@@ -289,6 +337,17 @@ interface ToolUseBlockProps {
 function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed = false, childBlocks, basePath, isStreaming }: ToolUseBlockProps): React.ReactElement {
   const [expanded, setExpanded] = React.useState(false)
   const toolResult = useToolResult(block.id, allMessages)
+  const resultText = toolResult?.result
+  const isError = toolResult?.isError === true
+  const shouldShowResult = !!resultText
+  const taskGetSummary = React.useMemo(() => {
+    if (block.name !== 'TaskGet' || !resultText || isError) return null
+    return parseTaskGetResult(resultText)
+  }, [block.name, resultText, isError])
+  const taskListSummary = React.useMemo(() => {
+    if (block.name !== 'TaskList' || !resultText || isError) return null
+    return parseTaskListResult(resultText)
+  }, [block.name, resultText, isError])
   const isAgentTool = block.name === 'Agent' || block.name === 'Task'
   const hasChildren = isAgentTool && childBlocks && childBlocks.length > 0
   const subAgentMeta = useSubAgentMeta(block.id, allMessages)
@@ -300,10 +359,15 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
   const ToolIcon = getToolIcon(block.name)
 
   const isCompleted = toolResult !== null
-  const isError = toolResult?.isError === true
 
   // 运行中显示进行时短语，完成或非流式（已终止）显示完成态短语
   const displayLabel = (isCompleted || !isStreaming) ? phrase.label : phrase.loadingLabel
+  const filePath = extractFilePath(block.input)
+  const isPreviewable = (
+    (block.name === 'Read' || block.name === 'Edit' || block.name === 'Write') &&
+    isCompleted &&
+    filePath
+  )
 
   const delay = animate && index < 10 ? `${index * 30}ms` : '0ms'
 
@@ -389,6 +453,16 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
                 resultText={toolResult?.result}
               />
             )}
+
+            {/* 底部收起按钮 */}
+            <button
+              type="button"
+              onClick={() => setChildrenExpanded(false)}
+              className="flex items-center gap-1 text-xs text-foreground/40 hover:text-foreground/70 transition-colors"
+            >
+              <ChevronUp className="size-3" />
+              <span>收起</span>
+            </button>
           </div>
         )}
       </div>
@@ -405,7 +479,10 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
     >
       <button
         type="button"
-        className="flex items-center gap-2 py-0.5 text-left hover:opacity-70 transition-opacity group"
+        className={cn(
+          'inline-flex max-w-full items-center gap-2 py-0.5 text-left transition-opacity group',
+          'hover:opacity-70',
+        )}
         onClick={() => setExpanded(!expanded)}
       >
         {!isCompleted && isStreaming ? (
@@ -417,19 +494,48 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
         <ToolIcon className={cn('size-3.5 shrink-0', dimmed ? 'text-muted-foreground/70' : 'text-muted-foreground')} />
 
         <span className={cn(
-          'truncate text-[14px]',
+          'min-w-0 truncate text-[14px]',
+          taskGetSummary || taskListSummary ? 'shrink-0' : '',
           dimmed ? 'text-muted-foreground/70' : 'text-muted-foreground',
-        )}>{renderLabelWithDiffColors(displayLabel, block.name)}</span>
+        )}>{displayLabel}</span>
+
+        {phrase.diffStats && (isCompleted || !isStreaming) && (
+          <span className="shrink-0 text-[14px] tabular-nums">
+            {phrase.diffStats.additions > 0 && (
+              <span className="text-green-500">+{phrase.diffStats.additions}</span>
+            )}
+            {phrase.diffStats.additions > 0 && phrase.diffStats.deletions > 0 && ' '}
+            {phrase.diffStats.deletions > 0 && (
+              <span className="text-red-500">-{phrase.diffStats.deletions}</span>
+            )}
+          </span>
+        )}
+
+        {taskGetSummary && (
+          <span className="flex min-w-0 items-center gap-1.5">
+            <TaskGetCollapsedSummary task={taskGetSummary} />
+          </span>
+        )}
+
+        {taskListSummary && (
+          <span className="flex min-w-0 items-center gap-1.5">
+            <TaskListCollapsedSummary tasks={taskListSummary} />
+          </span>
+        )}
 
         <ChevronRight
           className={cn(
-            'shrink-0 size-3 text-muted-foreground/40 opacity-0 group-hover:opacity-100 transition-all duration-150',
-            expanded && 'rotate-90 opacity-100',
+            'shrink-0 size-3 text-muted-foreground/45 transition-transform duration-150',
+            expanded && 'rotate-90',
           )}
         />
+
+        {isPreviewable && (
+          <PreviewOpenButton filePath={filePath} />
+        )}
       </button>
 
-      {expanded && toolResult?.result && (
+      {shouldShowResult && resultText && expanded && (
         <div className={cn(
           'ml-5.5 mt-1 mb-2 pl-3 border-l-2 border-border/30',
           animate && 'animate-in fade-in slide-in-from-top-1 duration-150',
@@ -437,8 +543,9 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
           <ToolResultRenderer
             toolName={block.name}
             input={block.input}
-            result={toolResult.result}
+            result={resultText}
             isError={isError}
+            basePath={basePath}
           />
         </div>
       )}
@@ -539,13 +646,13 @@ function ThinkingBlock({ block, dimmed = false }: ThinkingBlockProps): React.Rea
 
 // ===== ContentBlock 主组件 =====
 
-export function ContentBlock({ block, allMessages, basePath, animate = false, index = 0, dimmed = false, childBlocks, isStreaming }: ContentBlockProps): React.ReactElement | null {
+export function ContentBlock({ block, allMessages, basePath, basePaths, animate = false, index = 0, dimmed = false, childBlocks, isStreaming }: ContentBlockProps): React.ReactElement | null {
   // text 块 — 主要内容，不受 dimmed 影响
   if (block.type === 'text') {
     const textBlock = block as SDKTextBlock
     if (!textBlock.text) return null
     return (
-      <MessageResponse basePath={basePath}>{textBlock.text}</MessageResponse>
+      <MessageResponse basePath={basePath} basePaths={basePaths}>{textBlock.text}</MessageResponse>
     )
   }
 

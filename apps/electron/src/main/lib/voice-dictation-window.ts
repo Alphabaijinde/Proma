@@ -12,7 +12,6 @@ import { captureVoiceDictationTarget } from './text-output-service'
 import { getVoiceDictationSettings } from './voice-dictation-settings-service'
 
 let voiceDictationWindow: BrowserWindow | null = null
-let voiceDictationTargetIsProma = false
 let voiceDictationTargetCaptured = false
 let suppressMainWindowActivateUntil = 0
 let voiceDictationWindowReady = false
@@ -61,6 +60,7 @@ export function createVoiceDictationWindow(): void {
       partition: VOICE_DICTATION_PARTITION,
     },
   })
+  voiceDictationWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   installVoiceDictationMediaPermissions(voiceDictationWindow)
   installVoiceDictationPositionPersistence(voiceDictationWindow)
 
@@ -226,7 +226,7 @@ function flushPendingShowIfReady(): void {
 }
 
 function captureTargetForNextSession(targetIsProma?: boolean): void {
-  voiceDictationTargetIsProma = captureVoiceDictationTarget(targetIsProma)
+  captureVoiceDictationTarget(targetIsProma)
   voiceDictationTargetCaptured = true
 }
 
@@ -259,17 +259,12 @@ export function resizeVoiceDictationWindow(height: number): void {
 }
 
 export function hideVoiceDictationWindow(): void {
-  const shouldRestoreExternalFocus = voiceDictationTargetCaptured && !voiceDictationTargetIsProma
   flushPendingVoiceDictationPositionSave()
   suppressPromaActivationBriefly()
   if (voiceDictationWindow && !voiceDictationWindow.isDestroyed() && voiceDictationWindow.isVisible()) {
     voiceDictationWindow.hide()
   }
-  if (process.platform === 'darwin' && shouldRestoreExternalFocus) {
-    app.hide()
-  }
   voiceDictationTargetCaptured = false
-  voiceDictationTargetIsProma = false
 }
 
 function suppressPromaActivationBriefly(): void {
@@ -300,19 +295,25 @@ export function getVoiceDictationWindow(): BrowserWindow | null {
 }
 
 function getInitialVoiceDictationBounds(): Electron.Rectangle {
+  const cursorPoint = screen.getCursorScreenPoint()
+  const currentDisplay = screen.getDisplayNearestPoint(cursorPoint)
   const savedPosition = getSavedVoiceDictationPosition()
+
   if (savedPosition) {
+    const { workArea } = currentDisplay
+    const relativeX = savedPosition.relativeX ?? 0.5
+    const relativeY = savedPosition.relativeY ?? 0.28
+    const targetX = Math.round(workArea.x + relativeX * (workArea.width - WINDOW_WIDTH))
+    const targetY = Math.round(workArea.y + relativeY * (workArea.height - WINDOW_HEIGHT))
     return clampBoundsToVisibleWorkArea({
-      x: savedPosition.x,
-      y: savedPosition.y,
+      x: targetX,
+      y: targetY,
       width: WINDOW_WIDTH,
       height: WINDOW_HEIGHT,
     })
   }
 
-  const cursorPoint = screen.getCursorScreenPoint()
-  const display = screen.getDisplayNearestPoint(cursorPoint)
-  const { x, y, width, height } = display.workArea
+  const { x, y, width, height } = currentDisplay.workArea
 
   return clampBoundsToVisibleWorkArea({
     x: Math.round(x + (width - WINDOW_WIDTH) / 2),
@@ -322,12 +323,14 @@ function getInitialVoiceDictationBounds(): Electron.Rectangle {
   })
 }
 
-function getSavedVoiceDictationPosition(): Electron.Point | null {
+function getSavedVoiceDictationPosition(): { x: number; y: number; relativeX?: number; relativeY?: number } | null {
   const position = getSettings().voiceDictation?.windowPosition
   if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y)) return null
   return {
     x: Math.round(position.x),
     y: Math.round(position.y),
+    relativeX: Number.isFinite(position.relativeX) ? position.relativeX : undefined,
+    relativeY: Number.isFinite(position.relativeY) ? position.relativeY : undefined,
   }
 }
 
@@ -396,6 +399,14 @@ function flushPendingVoiceDictationPositionSave(): void {
 function saveVoiceDictationPosition(): void {
   if (!voiceDictationWindow || voiceDictationWindow.isDestroyed()) return
   const { x, y } = voiceDictationWindow.getBounds()
+  const display = screen.getDisplayNearestPoint({ x: x + WINDOW_WIDTH / 2, y: y + 48 })
+  const { workArea } = display
+  const relativeX = workArea.width > WINDOW_WIDTH
+    ? (x - workArea.x) / (workArea.width - WINDOW_WIDTH)
+    : 0.5
+  const relativeY = workArea.height > WINDOW_HEIGHT
+    ? (y - workArea.y) / (workArea.height - WINDOW_HEIGHT)
+    : 0.28
   const settings = getSettings()
   updateSettings({
     voiceDictation: {
@@ -403,6 +414,8 @@ function saveVoiceDictationPosition(): void {
       windowPosition: {
         x,
         y,
+        relativeX: clamp(relativeX, 0, 1),
+        relativeY: clamp(relativeY, 0, 1),
       },
     },
   })

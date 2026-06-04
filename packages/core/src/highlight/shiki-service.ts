@@ -24,7 +24,7 @@ const DEFAULT_LANGS: BundledLanguage[] = [
 ]
 
 /** 默认加载的主题 */
-const DEFAULT_THEMES: BundledTheme[] = ['github-light', 'github-dark']
+const DEFAULT_THEMES: BundledTheme[] = ['github-light', 'github-dark', 'one-light', 'one-dark-pro']
 
 /** 常见语言别名映射 */
 const LANGUAGE_ALIASES: Record<string, string> = {
@@ -68,6 +68,31 @@ export interface HighlightResult {
   language: string
 }
 
+/** 不规则语言显示名称（无法通过首字母大写自动生成） */
+const DISPLAY_NAMES: Record<string, string> = {
+  js: 'JavaScript', javascript: 'JavaScript',
+  ts: 'TypeScript', typescript: 'TypeScript',
+  tsx: 'TSX', jsx: 'JSX',
+  py: 'Python', rb: 'Ruby',
+  cpp: 'C++', 'c++': 'C++',
+  cs: 'C#', csharp: 'C#',
+  kt: 'Kotlin', rs: 'Rust',
+  sh: 'Shell', zsh: 'Shell',
+  yml: 'YAML', md: 'Markdown',
+  tf: 'Terraform',
+  html: 'HTML', css: 'CSS', scss: 'SCSS', less: 'LESS',
+  json: 'JSON', xml: 'XML', sql: 'SQL',
+  graphql: 'GraphQL', php: 'PHP',
+  plaintext: 'Text', text: 'Text',
+}
+
+/** 获取语言显示名称，未匹配的自动首字母大写 */
+export function getDisplayName(lang: string): string {
+  if (!lang) return 'Code'
+  const key = lang.toLowerCase()
+  return DISPLAY_NAMES[key] ?? key.charAt(0).toUpperCase() + key.slice(1)
+}
+
 /** 单个高亮 token */
 export interface HighlightToken {
   /** 文本内容 */
@@ -94,9 +119,34 @@ let highlighterPromise: Promise<ShikiHighlighter> | null = null
 /** 已 resolve 的高亮器实例缓存（同步访问用） */
 let cachedHighlighter: ShikiHighlighter | null = null
 
+/** 高亮器就绪订阅者，初始化完成后一次性触发并清空 */
+const readyListeners = new Set<() => void>()
+
+/** 是否已完成首次初始化（同步查询用） */
+export function isHighlighterReady(): boolean {
+  return cachedHighlighter !== null
+}
+
+/**
+ * 订阅高亮器就绪事件
+ * - 已就绪时立即同步触发回调，返回 noop unsubscribe
+ * - 未就绪时入队，初始化完成后触发一次后自动清理
+ * 返回 unsubscribe 函数，组件卸载时应调用以避免泄漏
+ */
+export function onHighlighterReady(callback: () => void): () => void {
+  if (cachedHighlighter) {
+    callback()
+    return () => {}
+  }
+  readyListeners.add(callback)
+  // 触发初始化（如果还没启动）
+  void getHighlighter()
+  return () => readyListeners.delete(callback)
+}
+
 /**
  * 获取或创建 Shiki 高亮器单例
- * 首次调用时懒加载，resolve 后缓存实例供同步使用
+ * 首次调用时懒加载，resolve 后缓存实例供同步使用，并通知所有 ready 订阅者
  */
 function getHighlighter(): Promise<ShikiHighlighter> {
   if (!highlighterPromise) {
@@ -105,6 +155,16 @@ function getHighlighter(): Promise<ShikiHighlighter> {
       langs: DEFAULT_LANGS,
     }).then((hl) => {
       cachedHighlighter = hl
+      // 通知所有等待中的订阅者，触发后清空（一次性事件）
+      const listeners = Array.from(readyListeners)
+      readyListeners.clear()
+      for (const listener of listeners) {
+        try {
+          listener()
+        } catch (error) {
+          console.error('[shiki-service] ready listener 抛错:', error)
+        }
+      }
       return hl
     })
   }

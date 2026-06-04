@@ -12,11 +12,13 @@ Proma 是一个本地优先的 AI 桌面应用，把多模型 Chat、通用 Agen
 
 [English README](./README.en.md) | [新手教程](./tutorial/tutorial.md) | [下载开源版](https://github.com/ErlichLiu/Proma/releases) | [下载商业版](https://proma.cool/download)
 
+> **最新思考 ｜ 2026 Q2–Q3**：[勇敢地解决真实的问题 — Proactive · 个人注意力 · 团队协作](./proma-thinking/proma-2026-q2-q3-thinking.md) ｜ 往期思考：[2026 Q1](./proma-thinking/proma-2026-q1-thinking.md)
+
 ## 现在能做什么
 
 - **Chat 模式**：多模型对话、附件解析、图片输入、Markdown / Mermaid / KaTeX / 代码高亮、并排对话、系统提示词、上下文管理。
 - **Agent 模式**：基于 `@anthropic-ai/claude-agent-sdk` 的通用 Agent，支持工作区隔离、权限模式、文件操作、长任务流式输出、计划确认和用户追问。
-- **Agent Teams / Tasks**：复杂任务可以拆分为多个子 Agent / Task，右侧面板展示团队工作状态和任务输出。
+- **SubAgent / Tasks**：复杂任务可以通过 Claude Agent SDK 的 Agent 工具拆分为子 Agent / Task，并在消息流中展示调用过程和结果。
 - **Skills & MCP**：每个工作区可以独立配置 Skills、MCP Server 和工作区文件，适合沉淀可复用能力。
 - **远程机器人**：支持飞书 / Lark 机器人桥接，并已提供钉钉、微信桥接入口，用手机或群聊触发本机 Agent 工作流。
 - **记忆与工具**：Chat 和 Agent 可共享记忆能力，并支持联网搜索、内置 Chat 工具、Agent 推荐等辅助能力。
@@ -107,6 +109,8 @@ Proma 支持豆包的流式语音输入功能，并且支持在 Proma 内使用�
 | 通义千问 | 支持 | 支持 | Anthropic 兼容协议 |
 | 自定义端点 | 支持 | 暂不支持 | OpenAI 兼容协议 |
 
+> **Kimi Coding Plan 用户须知**：Proma 已获得 Kimi 官方白名单支持，使用 Proma 连接 Kimi Coding Plan 不会触发第三方客户端封号策略，可放心使用。
+
 Agent 模式底层使用 Claude Agent SDK，因此目前要求渠道提供 Anthropic 或 Anthropic 兼容协议。Chat 模式则通过 `@proma/core` 的 Provider Adapter 统一接入不同协议。
 
 ## 本地数据
@@ -153,10 +157,10 @@ proma-v2/
 
 | 包 | 版本 | 职责 |
 | --- | --- | --- |
-| `@proma/electron` | `0.9.12` | Electron 桌面应用 |
-| `@proma/shared` | `0.1.17` | 共享类型、IPC 常量、配置和工具 |
+| `@proma/electron` | `0.10.7` | Electron 桌面应用 |
+| `@proma/shared` | `0.1.20` | 共享类型、IPC 常量、配置和工具 |
 | `@proma/core` | `0.2.9` | Provider Adapter、SSE、Shiki 高亮 |
-| `@proma/ui` | `0.1.3` | 共享 React UI 组件 |
+| `@proma/ui` | `0.1.6` | 共享 React UI 组件 |
 
 常用命令：
 
@@ -207,7 +211,7 @@ bun run dist:fast
 | 代码高亮 | Shiki |
 | 构建 | Vite + esbuild |
 | 分发 | electron-builder |
-| Agent SDK | `@anthropic-ai/claude-agent-sdk@0.2.123` |
+| Agent SDK | `@anthropic-ai/claude-agent-sdk@0.3.143` |
 
 ## 架构概览
 
@@ -264,10 +268,25 @@ Proma 目前设有 PR 赠金计划。提交 PR 时可以在描述中留下邮箱
 
 ![Proma PR Bounty](https://img.erlich.fun/personal-blog/uPic/PR%20%E8%B5%A0%E9%87%91%201.png)
 
+## 作者
+
+- 个人网站：[erlich.fun](https://erlich.fun)
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=ErlichLiu%2FProma&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=ErlichLiu/Proma&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=ErlichLiu/Proma&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=ErlichLiu/Proma&type=date&legend=top-left" />
+ </picture>
+</a>
+
+
 ## 致谢
 
 - [Shiki](https://shiki.style/)：代码高亮。
-- [Beautiful Mermaid](https://github.com/lukilabs/beautiful-mermaid)：Mermaid 图表渲染。
+- [Beautiful Mermaid](https://github.com/lukilabs/beautiful-mermaid) 与 [Mermaid](https://mermaid.js.org/)：Mermaid 图表渲染与官方兜底渲染。
 - [Cherry Studio](https://github.com/CherryHQ/cherry-studio)：多供应商桌面 AI 产品启发。
 - [Lobe Icons](https://github.com/lobehub/lobe-icons)：AI / LLM 品牌图标。
 - [Craft Agents OSS](https://github.com/lukilabs/craft-agents-oss)：Agent SDK 集成模式参考。
@@ -275,4 +294,12 @@ Proma 目前设有 PR 赠金计划。提交 PR 时可以在描述中留下邮箱
 
 ## 许可证
 
-当前 workspace 包在 `package.json` 中声明为 `Apache-2.0`。根目录许可证文件尚未补齐时，请以仓库实际发布内容和各包声明为准。
+Proma 社区版采用 [GNU Affero General Public License v3.0（AGPL-3.0）](./LICENSE) 开源，完整条款见根目录 `LICENSE` 文件。
+
+**个人 / 非商业使用**：自由使用、修改、分发，仅需遵守 AGPL-3.0 条款。
+
+**商业使用**：在完全遵守 AGPL-3.0 条款的前提下允许进行商业使用，包括但不限于：以源代码或修改后的形式分发软件、通过网络对外提供服务时必须公开完整修改源码（含网络交互层）、衍生作品须以 AGPL-3.0 继续授权。
+
+**商业授权（豁免 AGPL-3.0 义务）**：如果你希望将 Proma 集成到闭源产品、对外提供 SaaS 服务但不想公开衍生代码，或有其他无法满足 AGPL-3.0 条款的商业场景，请通过邮件联系获取商业许可：[erlichliu@gmail.com](mailto:erlichliu@gmail.com)。
+
+向本项目提交 Pull Request 即视为同意将贡献以 AGPL-3.0 及未来商业许可形式授权给项目维护者。

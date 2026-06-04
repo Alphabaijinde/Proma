@@ -14,6 +14,8 @@ import { GrepResultRenderer } from './grep-result'
 import { GlobResultRenderer } from './glob-result'
 import { WebSearchResultRenderer } from './web-search-result'
 import { WebFetchResultRenderer } from './web-fetch-result'
+import { TaskGetResultRenderer } from './task-get-result'
+import { TaskListResultRenderer } from './task-list-result'
 import { DefaultResultRenderer } from './default-result'
 
 export interface ToolResultRendererProps {
@@ -21,16 +23,17 @@ export interface ToolResultRendererProps {
   input: Record<string, unknown>
   result: string
   isError: boolean
+  basePath?: string
 }
 
-export function ToolResultRenderer({ toolName, input, result, isError }: ToolResultRendererProps): React.ReactElement {
+export function ToolResultRenderer({ toolName, input, result, isError, basePath }: ToolResultRendererProps): React.ReactElement {
   switch (toolName) {
     case 'Bash':
       return <BashResultRenderer result={result} isError={isError} input={input} />
     case 'Read':
       return <ReadResultRenderer result={result} isError={isError} input={input} />
     case 'Edit':
-      return <EditResultRenderer result={result} isError={isError} input={input} />
+      return <EditResultRenderer result={result} isError={isError} input={input} basePath={basePath} />
     case 'Write':
       return <WriteResultRenderer result={result} isError={isError} input={input} />
     case 'Grep':
@@ -41,6 +44,10 @@ export function ToolResultRenderer({ toolName, input, result, isError }: ToolRes
       return <WebSearchResultRenderer result={result} isError={isError} />
     case 'WebFetch':
       return <WebFetchResultRenderer result={result} isError={isError} />
+    case 'TaskGet':
+      return <TaskGetResultRenderer result={result} isError={isError} />
+    case 'TaskList':
+      return <TaskListResultRenderer result={result} isError={isError} />
     default:
       return <DefaultResultRenderer result={result} isError={isError} />
   }

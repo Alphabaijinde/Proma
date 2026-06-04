@@ -8,10 +8,11 @@
 import type React from 'react'
 import { ReactRenderer } from '@tiptap/react'
 import type { SuggestionOptions } from '@tiptap/suggestion'
-import { Sparkles, Server } from 'lucide-react'
+import { MessageSquareText, Sparkles, Server } from 'lucide-react'
 import { MentionList } from './MentionList'
 import type { MentionListRef } from './MentionList'
 import { createMentionPopup, positionPopup } from './mention-popup-utils'
+import type { AgentSessionReferenceSearchResult } from '@proma/shared'
 
 // ===== 泛型工厂 =====
 
@@ -39,6 +40,7 @@ function createMentionSuggestion<T>(
   return {
     char: config.char,
     allowSpaces: false,
+    allowedPrefixes: null,
 
     items: async ({ query }): Promise<T[]> => {
       const slug = workspaceSlugRef.current
@@ -53,15 +55,35 @@ function createMentionSuggestion<T>(
     render: () => {
       let renderer: ReactRenderer<MentionListRef> | null = null
       let popup: HTMLDivElement | null = null
+      let blurHandler: (() => void) | null = null
+      let editorDom: HTMLElement | null = null
+
+      function cleanup() {
+        if (blurHandler && editorDom) {
+          editorDom.removeEventListener('blur', blurHandler, true)
+          blurHandler = null
+        }
+        editorDom = null
+        mentionActiveRef.current = false
+        mentionItemCountRef.current = 0
+        popup?.remove()
+        popup = null
+        renderer?.destroy()
+        renderer = null
+      }
 
       return {
         onStart(props) {
+          if (popup || renderer) {
+            cleanup()
+          }
+
           mentionActiveRef.current = true
           mentionItemCountRef.current = props.items.length
+          editorDom = props.editor.view.dom
           renderer = new ReactRenderer(MentionList, {
             props: {
               items: props.items,
-              selectedIndex: 0,
               emptyText: config.emptyText,
               keyExtractor: config.keyExtractor,
               renderItem: config.renderItem,
@@ -74,6 +96,15 @@ function createMentionSuggestion<T>(
           })
           popup = createMentionPopup(renderer.element)
           positionPopup(popup, props.clientRect?.())
+
+          blurHandler = () => {
+            setTimeout(() => {
+              if (!props.editor.view.hasFocus() && popup) {
+                cleanup()
+              }
+            }, 100)
+          }
+          editorDom.addEventListener('blur', blurHandler, true)
         },
 
         onUpdate(props) {
@@ -93,12 +124,7 @@ function createMentionSuggestion<T>(
         },
 
         onExit() {
-          mentionActiveRef.current = false
-          mentionItemCountRef.current = 0
-          popup?.remove()
-          popup = null
-          renderer?.destroy()
-          renderer = null
+          cleanup()
         },
       }
     },
@@ -182,6 +208,49 @@ export function createMcpMentionSuggestion(
       toCommand: (item) => ({ id: item.id, label: item.name }),
     },
     workspaceSlugRef,
+    mentionActiveRef,
+    mentionItemCountRef,
+  )
+}
+
+// ===== Agent 会话引用配置 =====
+
+export type SessionMentionItem = AgentSessionReferenceSearchResult
+
+export function createSessionMentionSuggestion(
+  workspaceIdRef: React.RefObject<string | null>,
+  currentSessionIdRef: React.RefObject<string | null>,
+  mentionActiveRef: React.MutableRefObject<boolean>,
+  mentionItemCountRef: React.MutableRefObject<number>,
+) {
+  return createMentionSuggestion<SessionMentionItem>(
+    {
+      char: '&',
+      emptyText: '无匹配会话',
+      fetchItems: async (_slug, q) => {
+        const workspaceId = workspaceIdRef.current
+        if (!workspaceId) return []
+        return window.electronAPI.searchAgentSessionReferences({
+          workspaceId,
+          excludeSessionId: currentSessionIdRef.current ?? undefined,
+          query: q,
+          limit: 20,
+        })
+      },
+      keyExtractor: (item) => item.sessionId,
+      renderItem: (item) => (
+        <>
+          <MessageSquareText className="size-3.5 text-sky-500 flex-shrink-0" />
+          <span className="truncate font-medium flex-1 min-w-0">{item.title}</span>
+          {item.snippet && (
+            <span className="truncate text-[10px] text-muted-foreground/50 max-w-[120px]">{item.snippet}</span>
+          )}
+        </>
+      ),
+      toCommand: (item) => ({ id: item.sessionId, label: item.title }),
+    },
+    // 会话引用不依赖 slug，但复用通用 mention 工厂时需要一个非空 ref 才会触发 fetchItems。
+    workspaceIdRef,
     mentionActiveRef,
     mentionItemCountRef,
   )

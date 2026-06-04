@@ -12,7 +12,7 @@ It is not just another chat box. Proma is meant to become a long-lived Agent wor
 
 - **Chat mode**: multi-model conversations, attachments, image input, Markdown / Mermaid / KaTeX / code highlighting, parallel conversations, system prompts, and context controls.
 - **Agent mode**: general-purpose Agent powered by `@anthropic-ai/claude-agent-sdk`, with workspace isolation, permission modes, file operations, streaming output, plan confirmation, and ask-user interactions.
-- **Agent Teams / Tasks**: complex tasks can be split into multiple sub-agents or tasks, with the right-side panel showing team progress and task output.
+- **SubAgents / Tasks**: complex tasks can be delegated through the Claude Agent SDK Agent tool, with sub-agent calls and results shown in the message stream.
 - **Skills & MCP**: each workspace can manage its own Skills, MCP servers, and workspace files.
 - **Remote bots**: Lark / Feishu bot bridging is supported, with DingTalk and WeChat bridge entry points also present in the app.
 - **Memory and tools**: Chat and Agent can share memory, with web search, built-in Chat tools, and Agent recommendation helpers.
@@ -104,6 +104,8 @@ Proma supports Doubao-powered streaming voice input, both inside Proma and acros
 | Doubao | Supported | Supported | Anthropic-compatible protocol |
 | Qwen | Supported | Supported | Anthropic-compatible protocol |
 | Custom endpoint | Supported | Not yet | OpenAI-compatible protocol |
+
+> **Kimi Coding Plan users**: Proma is officially whitelisted by Kimi. Using Proma with your Kimi Coding Plan subscription will not trigger any third-party client ban policy.
 
 Agent mode is powered by Claude Agent SDK, so it currently requires an Anthropic or Anthropic-compatible channel. Chat mode uses Provider Adapters from `@proma/core` to support different protocols.
 
@@ -205,7 +207,7 @@ bun run dist:fast
 | Code highlighting | Shiki |
 | Build | Vite + esbuild |
 | Distribution | electron-builder |
-| Agent SDK | `@anthropic-ai/claude-agent-sdk@0.2.123` |
+| Agent SDK | `@anthropic-ai/claude-agent-sdk@0.3.143` |
 
 ## Architecture
 
@@ -262,6 +264,16 @@ Proma currently has a PR bounty program. You can leave your email in the PR desc
 
 ![Proma PR Bounty](https://img.erlich.fun/personal-blog/uPic/PR%20%E8%B5%A0%E9%87%91%201.png)
 
+## Star History
+
+<a href="https://www.star-history.com/?repos=ErlichLiu%2FProma&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=ErlichLiu/Proma&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=ErlichLiu/Proma&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=ErlichLiu/Proma&type=date&legend=top-left" />
+ </picture>
+</a>
+
 ## Credits
 
 - [Shiki](https://shiki.style/): code highlighting.
@@ -273,4 +285,12 @@ Proma currently has a PR bounty program. You can leave your email in the PR desc
 
 ## License
 
-Current workspace packages declare `Apache-2.0` in their `package.json` files. Until a root license file is added, please refer to the actual repository release contents and package declarations.
+The Proma Community Edition is licensed under the [GNU Affero General Public License v3.0 (AGPL-3.0)](./LICENSE). The full license text is available in the `LICENSE` file at the repository root.
+
+**Personal / non-commercial use**: free to use, modify, and distribute, subject to the terms of AGPL-3.0.
+
+**Commercial use**: permitted as long as you fully comply with AGPL-3.0, including (but not limited to) releasing the complete corresponding source code of any modified version you distribute or make available over a network, and licensing all derivative works under AGPL-3.0.
+
+**Commercial license (exemption from AGPL-3.0 obligations)**: if you want to integrate Proma into a closed-source product, offer it as a SaaS service without releasing your modifications, or use it in any way that cannot meet AGPL-3.0 requirements, please contact us by email to obtain a commercial license: [erlichliu@gmail.com](mailto:erlichliu@gmail.com).
+
+By submitting a Pull Request to this project, you agree to license your contribution under AGPL-3.0 and to grant the maintainer the right to relicense it under future commercial license terms.

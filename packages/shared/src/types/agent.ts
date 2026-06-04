@@ -247,10 +247,13 @@ export interface SDKResultMessage {
   total_cost_usd?: number
   modelUsage?: Record<string, { contextWindow?: number }>
   errors?: string[]
+  terminal_reason?: string
+  background_tasks?: SDKBackgroundTaskSummary[]
+  session_crons?: SDKSessionCronSummary[]
   session_id?: string
 }
 
-/** SDK system 消息（init / compact_boundary / task_started / task_progress / task_notification） */
+/** SDK system 消息（init / compact_boundary / permission_denied / task_started / task_progress / task_notification） */
 export interface SDKSystemMessage {
   type: 'system'
   subtype?: string
@@ -266,8 +269,44 @@ export interface SDKSystemMessage {
   summary?: string
   output_file?: string
   last_tool_name?: string
+  /** permission_denied 相关字段 */
+  tool_name?: string
+  message?: string
+  decision_reason_type?: string
+  decision_reason?: string
   usage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number }
   [key: string]: unknown
+}
+
+/** SDK thinking token 估算消息（Claude Agent SDK 0.3.156+） */
+export interface SDKThinkingTokensMessage {
+  type: 'system'
+  subtype: 'thinking_tokens'
+  estimated_tokens: number
+  estimated_tokens_delta: number
+  uuid?: string
+  session_id?: string
+}
+
+/** SDK 后台任务摘要（result / hook 中可能出现） */
+export interface SDKBackgroundTaskSummary {
+  id: string
+  type: string
+  status: string
+  description: string
+  command?: string
+  agent_type?: string
+  server?: string
+  tool?: string
+  name?: string
+}
+
+/** SDK 会话级定时任务摘要（result / hook 中可能出现） */
+export interface SDKSessionCronSummary {
+  id: string
+  schedule: string
+  recurring: boolean
+  prompt: string
 }
 
 /** SDK tool_progress 消息（工具执行心跳） */
@@ -277,7 +316,7 @@ export interface SDKToolProgressMessage {
   tool_name: string
   parent_tool_use_id: string | null
   elapsed_time_seconds?: number
-  /** Agent Teams: 所属 teammate 任务 ID */
+  /** 所属 SDK 子任务 / SubAgent 任务 ID */
   task_id?: string
   session_id?: string
 }
@@ -302,6 +341,7 @@ export type SDKMessage =
   | SDKAssistantMessage
   | SDKUserMessage
   | SDKResultMessage
+  | SDKThinkingTokensMessage
   | SDKSystemMessage
   | SDKToolProgressMessage
   | SDKPromptSuggestionMessage
@@ -330,6 +370,7 @@ export type ErrorCode =
   | 'invalid_request'
   | 'image_too_large'
   | 'prompt_too_long'
+  | 'thinking_signature_invalid'
   | 'provider_error'
   // 环境 / 配置类错误（本地可修复）
   | 'windows_shell_missing'
@@ -389,7 +430,7 @@ export interface AgentEventUsage {
   contextWindow?: number
 }
 
-/** Teammate 任务用量统计 */
+/** SDK 子任务 / SubAgent 用量统计 */
 export interface TaskUsage {
   /** 总 Token 数 */
   totalTokens: number
@@ -444,6 +485,9 @@ export interface AgentToolResultImage {
   mediaType: string
 }
 
+/** 计划阶段状态变化来源 */
+export type AgentPlanModeChangeSource = 'initial' | 'tool' | 'permission'
+
 /**
  * Agent 事件流类型
  *
@@ -461,6 +505,7 @@ export type AgentEvent =
   | { type: 'task_started'; taskId: string; toolUseId?: string; description: string; taskType?: string; turnId?: string }
   | { type: 'task_progress'; toolUseId: string; elapsedSeconds?: number; turnId?: string; taskId?: string; description?: string; lastToolName?: string; usage?: TaskUsage }
   | { type: 'task_notification'; taskId: string; toolUseId?: string; status: 'completed' | 'failed' | 'stopped'; summary: string; outputFile?: string; usage?: TaskUsage; turnId?: string }
+  | { type: 'thinking_tokens'; estimatedTokens: number; estimatedTokensDelta: number }
   | { type: 'shell_backgrounded'; toolUseId: string; shellId: string; intent?: string; command?: string; turnId?: string }
   | { type: 'shell_killed'; shellId: string; turnId?: string }
   // 工具使用摘要
@@ -490,13 +535,12 @@ export type AgentEvent =
   | { type: 'exit_plan_mode_resolved'; requestId: string }
   // EnterPlanMode 进入计划模式
   | { type: 'enter_plan_mode'; sessionId: string }
+  // 当前是否处于计划阶段（与用户选择的权限模式分离）
+  | { type: 'plan_mode_changed'; active: boolean; source: AgentPlanModeChangeSource }
   // 提示建议
   | { type: 'prompt_suggestion'; suggestion: string }
   // 模型确认（SDK 确认实际使用的模型）
   | { type: 'model_resolved'; model: string }
-  // Auto-Resume（Teams 完成后自动收集结果）
-  | { type: 'waiting_resume'; message: string }
-  | { type: 'resume_start'; messageId: string }
   // 权限模式变更（Plan → bypassPermissions 等）
   | { type: 'permission_mode_changed'; mode: PromaPermissionMode }
 
@@ -511,12 +555,15 @@ export type PromaEvent =
   | { type: 'exit_plan_mode_request'; request: ExitPlanModeRequest }
   | { type: 'exit_plan_mode_resolved'; requestId: string }
   | { type: 'enter_plan_mode'; sessionId: string }
+  | { type: 'plan_mode_changed'; sessionId: string; active: boolean; source: AgentPlanModeChangeSource }
   | { type: 'retry'; status: 'starting' | 'attempt' | 'cleared' | 'failed'; attempt?: number; maxAttempts?: number; delaySeconds?: number; reason?: string; attemptData?: RetryAttempt; error?: TypedError }
   | { type: 'model_resolved'; model: string }
-  | { type: 'waiting_resume'; message: string }
-  | { type: 'resume_start'; messageId: string }
   | { type: 'permission_mode_changed'; mode: PromaPermissionMode }
+  | { type: 'title_updated'; title: string }
+  | { type: 'external_run_started'; source: AgentExternalRunSource; sessionId: string; title?: string; workspaceId?: string; modelId?: string; startedAt: number }
 
+/** 外部入口触发 Agent 运行的来源 */
+export type AgentExternalRunSource = 'feishu' | 'dingtalk' | 'wechat' | 'bridge'
 
 /** IPC 传输的统一 payload（替代 AgentEvent） */
 export type AgentStreamPayload =
@@ -548,6 +595,8 @@ export interface AgentSessionMeta {
   archived?: boolean
   /** 附加的外部目录路径列表（绝对路径，作为 SDK additionalDirectories 传递） */
   attachedDirectories?: string[]
+  /** 附加的外部文件路径列表（绝对路径，发送时以父目录作为 SDK additionalDirectories） */
+  attachedFiles?: string[]
   /** 分叉来源：源会话的 Proma 工作目录（SDK session 文件在此目录的项目空间中，首次 resume 后清除） */
   forkSourceDir?: string
   /** 分叉来源：源会话的 SDK session ID（用于 rewind 时读取源会话的 file-history-snapshot 和备份文件） */
@@ -556,9 +605,11 @@ export interface AgentSessionMeta {
   resumeAtMessageUuid?: string
   /** 手动标记为工作中 */
   manualWorking?: boolean
+  /** Agent 执行完成但用户尚未确认（跨重启保留在工作中列表） */
+  completedButUnconfirmed?: boolean
   /** 最后一次流式执行是否被用户主动中断 */
   stoppedByUser?: boolean
-  /** 该会话当前的权限模式（持久化到磁盘，重启后恢复）。未设置时新会话默认 bypassPermissions */
+  /** 该会话当前的权限模式（持久化到磁盘，重启后恢复）。未设置时新会话默认 auto */
   permissionMode?: PromaPermissionMode
   /** 创建时间戳 */
   createdAt: number
@@ -624,6 +675,36 @@ export interface AgentMessageSearchResult {
   matchLength: number
   /** 是否已归档 */
   archived?: boolean
+}
+
+/**
+ * Agent 会话引用搜索输入
+ */
+export interface AgentSessionReferenceSearchInput {
+  /** 当前工作区 ID，仅搜索该工作区下的会话 */
+  workspaceId: string
+  /** 搜索关键词，匹配标题或消息内容 */
+  query?: string
+  /** 排除当前会话，避免引用自己 */
+  excludeSessionId?: string
+  /** 最大返回数量 */
+  limit?: number
+}
+
+/**
+ * Agent 会话引用搜索结果
+ */
+export interface AgentSessionReferenceSearchResult {
+  /** 会话 ID */
+  sessionId: string
+  /** 会话标题 */
+  title: string
+  /** 更新时间戳 */
+  updatedAt: number
+  /** 命中消息片段；标题命中时可为空 */
+  snippet?: string
+  /** 命中来源 */
+  matchSource: 'title' | 'message' | 'recent'
 }
 
 // ===== Agent 标题生成输入 =====
@@ -706,6 +787,33 @@ export interface OtherWorkspaceSkillsGroup {
   skills: SkillMeta[]
 }
 
+/** Skill 目录下的文件/子目录节点（递归树） */
+export interface SkillFileNode {
+  /** 相对于 Skill 根目录的相对路径，使用 POSIX 分隔符 */
+  relativePath: string
+  /** 末段名字（用于显示） */
+  name: string
+  /** 类型：文件 / 目录 */
+  type: 'file' | 'directory'
+  /** 文件大小（字节）；目录为 undefined */
+  size?: number
+  /** 是否为文本文件（可在内置编辑器中打开）；目录为 undefined */
+  isText?: boolean
+  /** 子节点（仅 type=directory 有值，已按目录优先 + 名称排序） */
+  children?: SkillFileNode[]
+}
+
+/** 读取 Skill 子文件的响应 */
+export interface SkillFileContent {
+  relativePath: string
+  /** 文本内容（仅 isText=true 时存在） */
+  content?: string
+  /** 是否为文本文件 */
+  isText: boolean
+  /** 文件大小（字节） */
+  size: number
+}
+
 /** 工作区能力摘要（MCP + Skill 计数） */
 export interface WorkspaceCapabilities {
   mcpServers: Array<{ name: string; enabled: boolean; type: McpTransportType }>
@@ -738,6 +846,8 @@ export interface AgentSendInput {
   mentionedSkills?: string[]
   /** 用户通过 #mcp:xxx 引用的 MCP 服务器名称列表 */
   mentionedMcpServers?: string[]
+  /** 用户通过会话引用 mention 指定的 Agent 会话 ID 列表 */
+  mentionedSessionIds?: string[]
   /** 渲染进程生成的流式开始时间戳，主进程原样回传到 STREAM_COMPLETE，确保竞态保护比较的是同一个值 */
   startedAt?: number
 }
@@ -876,6 +986,8 @@ export interface FileEntry {
   path: string
   /** 是否为目录 */
   isDirectory: boolean
+  /** 文件大小（字节）。目录为空 */
+  size?: number
   /** 子条目（懒加载，仅目录展开时填充） */
   children?: FileEntry[]
 }
@@ -914,6 +1026,12 @@ export interface AgentPendingFile {
   previewUrl?: string
   /** 文件原始路径（从侧面板添加时设置，发送时跳过复制直接引用） */
   sourcePath?: string
+  /**
+   * 标记 sourcePath 指向的是剪贴板临时预览文件（os.tmpdir）。
+   * 这类文件可能被系统清理，发送时需读取其最新内容拷贝进 session 目录，
+   * 而非像侧面板真实文件那样原地引用。
+   */
+  isClipboardDraft?: boolean
 }
 
 /** Agent 文件保存到 session 的输入 */
@@ -943,12 +1061,40 @@ export interface AgentAttachDirectoryInput {
   directoryPath: string
 }
 
+/** 附加/分离文件的输入参数 */
+export interface AgentAttachFileInput {
+  /** 会话 ID */
+  sessionId: string
+  /** 文件的绝对路径 */
+  filePath: string
+}
+
 /** 工作区级附加/分离目录的输入参数 */
 export interface WorkspaceAttachDirectoryInput {
   /** 工作区 slug */
   workspaceSlug: string
   /** 目录的绝对路径 */
   directoryPath: string
+}
+
+/** 工作区级附加/分离文件的输入参数 */
+export interface WorkspaceAttachFileInput {
+  /** 工作区 slug */
+  workspaceSlug: string
+  /** 文件的绝对路径 */
+  filePath: string
+}
+
+/** Worktree 仓库配置 */
+export interface WorkspaceWorktreeRepo {
+  /** 显示名称 */
+  name: string
+  /** 主仓库绝对路径 */
+  repoPath: string
+  /** Worktree 存放目录绝对路径 */
+  worktreesPath: string
+  /** 优先级（数字越小越优先） */
+  priority?: number
 }
 
 // ===== AskUserQuestion 交互式问答类型 =====
@@ -1032,21 +1178,50 @@ export interface ExitPlanModeResponse {
 
 // ===== 权限系统类型 =====
 
-/** Proma 权限模式（直接映射 SDK 原生模式） */
-export type PromaPermissionMode = 'auto' | 'bypassPermissions' | 'plan'
+/** 当前 Proma 支持的权限模式，值直接映射 SDK 原生 permissionMode */
+export const PROMA_PERMISSION_MODES = ['auto', 'bypassPermissions', 'plan'] as const
+
+export type PromaPermissionMode = typeof PROMA_PERMISSION_MODES[number]
+
+export const PROMA_DEFAULT_PERMISSION_MODE: PromaPermissionMode = 'bypassPermissions'
+
+export interface PromaPermissionModeConfig {
+  /** 对应 Claude Agent SDK 的 permissionMode */
+  sdkMode: PromaPermissionMode
+  label: string
+  description: string
+}
+
+/** Proma 权限模式的单一配置来源 */
+export const PROMA_PERMISSION_MODE_CONFIG = {
+  auto: {
+    sdkMode: 'auto',
+    label: '自动审批',
+    description: 'SDK 内置审批器自动判断，危险操作才需确认',
+  },
+  bypassPermissions: {
+    sdkMode: 'bypassPermissions',
+    label: '完全自动',
+    description: '所有工具调用自动允许',
+  },
+  plan: {
+    sdkMode: 'plan',
+    label: '计划模式',
+    description: '仅规划不执行，查看工具使用计划',
+  },
+} as const satisfies Record<PromaPermissionMode, PromaPermissionModeConfig>
 
 /** 权限模式定义顺序（用于循环切换） */
-export const PROMA_PERMISSION_MODE_ORDER: readonly PromaPermissionMode[] = ['auto', 'bypassPermissions', 'plan']
+export const PROMA_PERMISSION_MODE_ORDER: readonly PromaPermissionMode[] = PROMA_PERMISSION_MODES
 
-/** 迁移旧权限模式值到新模式 */
+export function isPromaPermissionMode(mode: string): mode is PromaPermissionMode {
+  return (PROMA_PERMISSION_MODES as readonly string[]).includes(mode)
+}
+
+/** 规范化权限模式：不匹配当前三种模式时统一回到默认自动审批 */
 export function migratePermissionMode(mode: string): PromaPermissionMode {
-  if (mode === 'auto' || mode === 'bypassPermissions' || mode === 'plan') return mode
-  const migration: Record<string, PromaPermissionMode> = {
-    acceptEdits: 'auto',
-    smart: 'auto',
-    supervised: 'auto',
-  }
-  return migration[mode] ?? 'auto'
+  if (isPromaPermissionMode(mode)) return mode
+  return PROMA_DEFAULT_PERMISSION_MODE
 }
 
 /** 危险等级 */
@@ -1070,6 +1245,10 @@ export interface PermissionRequest {
   dangerLevel: DangerLevel
   /** SDK 提供的原因说明 */
   decisionReason?: string
+  /** SDK 提供的原因分类，如 classifier / safetyCheck / rule */
+  decisionReasonType?: string
+  /** SDK auto safety check 是否允许交给 classifier 审批 */
+  classifierApprovable?: boolean
   /** SDK 提供的工具显示名称，如 "Write" */
   sdkDisplayName?: string
   /** SDK 提供的操作标题，如 "Write to /path/to/file.ts" */
@@ -1084,86 +1263,6 @@ export interface PermissionResponse {
   behavior: 'allow' | 'deny'
   /** 是否记住选择（加入会话白名单） */
   alwaysAllow: boolean
-}
-
-// ===== Agent Teams 数据类型 =====
-
-/** Team 配置（~/.claude/teams/{name}/config.json） */
-export interface TeamConfig {
-  /** 团队名称 */
-  name: string
-  /** 团队描述 */
-  description?: string
-  /** 创建时间戳 */
-  createdAt: number
-  /** 领导 Agent ID */
-  leadAgentId?: string
-  /** 领导 Agent 的 SDK 会话 ID */
-  leadSessionId?: string
-  /** 团队成员列表 */
-  members: TeamMember[]
-}
-
-/** Team 成员 */
-export interface TeamMember {
-  /** Agent ID */
-  agentId: string
-  /** 显示名称 */
-  name: string
-  /** Agent 类型（如 'general-purpose', 'Explore'） */
-  agentType: string
-  /** 使用的模型 */
-  model?: string
-  /** 颜色标识 */
-  color?: string
-  /** 加入时间戳 */
-  joinedAt?: number
-}
-
-/** 任务项（~/.claude/tasks/{teamName}/） */
-export interface TaskItem {
-  /** 任务 ID */
-  id: string
-  /** 任务标题 */
-  subject: string
-  /** 任务描述 */
-  description?: string
-  /** 进行中的显示文本 */
-  activeForm?: string
-  /** 负责人 Agent 名称 */
-  owner?: string
-  /** 任务状态 */
-  status: 'pending' | 'in_progress' | 'completed'
-  /** 阻塞的任务 ID 列表 */
-  blocks: string[]
-  /** 被阻塞的任务 ID 列表 */
-  blockedBy: string[]
-}
-
-/** 解析后的收件箱消息 */
-export interface ParsedMailboxMessage {
-  /** 发送者名称 */
-  from: string
-  /** 消息文本 */
-  text: string
-  /** 摘要 */
-  summary?: string
-  /** 时间戳 */
-  timestamp?: string
-  /** 解析后的消息类型 */
-  parsedType: 'idle_notification' | 'shutdown_request' | 'shutdown_approved' | 'task_assignment' | 'text'
-}
-
-/** Agent Team 聚合数据（IPC 返回） */
-export interface AgentTeamData {
-  /** 团队名称 */
-  teamName: string
-  /** 团队配置 */
-  team: TeamConfig
-  /** 任务列表 */
-  tasks: TaskItem[]
-  /** 收件箱消息（agent 名称 → 消息列表） */
-  inboxes: Record<string, ParsedMailboxMessage[]>
 }
 
 // ===== IPC 通道常量 =====
@@ -1189,10 +1288,14 @@ export const AGENT_IPC_CHANNELS = {
   TOGGLE_PIN: 'agent:toggle-pin',
   /** 切换会话手动工作中状态 */
   TOGGLE_MANUAL_WORKING: 'agent:toggle-manual-working',
+  /** 确认会话已完成（清除 completedButUnconfirmed 和 manualWorking） */
+  CONFIRM_WORKING_DONE: 'agent:confirm-working-done',
   /** 切换会话归档状态 */
   TOGGLE_ARCHIVE: 'agent:toggle-archive',
   /** 搜索会话消息内容 */
   SEARCH_MESSAGES: 'agent:search-messages',
+  /** 搜索当前工作区可引用的 Agent 会话 */
+  SEARCH_SESSION_REFERENCES: 'agent:search-session-references',
   /** 迁移会话到另一个工作区 */
   MOVE_SESSION_TO_WORKSPACE: 'agent:move-session-to-workspace',
   /** 分叉会话（从指定消息处创建新会话） */
@@ -1255,6 +1358,18 @@ export const AGENT_IPC_CHANNELS = {
   READ_SKILL_CONTENT: 'agent:read-skill-content',
   /** 写入 SKILL.md 全文内容 */
   WRITE_SKILL_CONTENT: 'agent:write-skill-content',
+  /** 列出 Skill 目录下的子文件树（不含 SKILL.md） */
+  LIST_SKILL_FILES: 'agent:list-skill-files',
+  /** 读取 Skill 目录下的子文件内容 */
+  READ_SKILL_FILE: 'agent:read-skill-file',
+  /** 写入 Skill 目录下的子文件内容 */
+  WRITE_SKILL_FILE: 'agent:write-skill-file',
+  /** 在 Skill 目录下创建文件或目录 */
+  CREATE_SKILL_ENTRY: 'agent:create-skill-entry',
+  /** 删除 Skill 目录下的文件或目录 */
+  DELETE_SKILL_ENTRY: 'agent:delete-skill-entry',
+  /** 重命名/移动 Skill 目录下的文件或目录 */
+  RENAME_SKILL_ENTRY: 'agent:rename-skill-entry',
 
   // 流式事件（主进程 → 渲染进程推送）
   /** Agent 流式事件 */
@@ -1277,12 +1392,28 @@ export const AGENT_IPC_CHANNELS = {
   ATTACH_DIRECTORY: 'agent:attach-directory',
   /** 移除会话的附加目录 */
   DETACH_DIRECTORY: 'agent:detach-directory',
+  /** 附加外部文件到 Agent 会话 */
+  ATTACH_FILE: 'agent:attach-file',
+  /** 移除会话的附加文件 */
+  DETACH_FILE: 'agent:detach-file',
   /** 附加外部目录到工作区（所有会话共享） */
   ATTACH_WORKSPACE_DIRECTORY: 'agent:attach-workspace-directory',
   /** 移除工作区的附加目录 */
   DETACH_WORKSPACE_DIRECTORY: 'agent:detach-workspace-directory',
+  /** 附加外部文件到工作区（所有会话共享） */
+  ATTACH_WORKSPACE_FILE: 'agent:attach-workspace-file',
+  /** 移除工作区的附加文件 */
+  DETACH_WORKSPACE_FILE: 'agent:detach-workspace-file',
   /** 获取工作区附加目录列表 */
   GET_WORKSPACE_DIRECTORIES: 'agent:get-workspace-directories',
+  /** 获取工作区附加文件列表 */
+  GET_WORKSPACE_ATTACHED_FILES: 'agent:get-workspace-attached-files',
+  /** 获取工作区 worktree 仓库配置列表 */
+  GET_WORKTREE_REPOS: 'agent:get-worktree-repos',
+  /** 添加 worktree 仓库到工作区配置 */
+  ADD_WORKTREE_REPO: 'agent:add-worktree-repo',
+  /** 从工作区配置移除 worktree 仓库 */
+  REMOVE_WORKTREE_REPO: 'agent:remove-worktree-repo',
 
   // 文件系统操作
   /** 获取 session 工作路径 */
@@ -1295,16 +1426,12 @@ export const AGENT_IPC_CHANNELS = {
   OPEN_FILE: 'agent:open-file',
   /** 在系统文件管理器中显示文件 */
   SHOW_IN_FOLDER: 'agent:show-in-folder',
-  /** 在新窗口中预览文件 */
-  PREVIEW_FILE: 'agent:preview-file',
   /** 重命名文件/目录 */
   RENAME_FILE: 'agent:rename-file',
   /** 移动文件/目录到目标目录 */
   MOVE_FILE: 'agent:move-file',
   /** 列出附加目录内容（无工作区路径限制） */
   LIST_ATTACHED_DIRECTORY: 'agent:list-attached-directory',
-  /** 用系统默认应用打开附加目录文件（无工作区路径限制） */
-  OPEN_ATTACHED_FILE: 'agent:open-attached-file',
   /** 在文件管理器中显示附加目录文件（无工作区路径限制） */
   SHOW_ATTACHED_IN_FOLDER: 'agent:show-attached-in-folder',
   /** 重命名附加目录文件/目录（无工作区路径限制） */
@@ -1317,6 +1444,8 @@ export const AGENT_IPC_CHANNELS = {
   READ_ATTACHED_FILE: 'agent:read-attached-file',
   /** 搜索工作区文件（用于 @ 引用） */
   SEARCH_WORKSPACE_FILES: 'agent:search-workspace-files',
+  /** 将文本内容写入临时预览文件并返回绝对路径 */
+  WRITE_CLIPBOARD_PREVIEW: 'agent:write-clipboard-preview',
 
   // 标题自动生成通知（主进程 → 渲染进程推送）
   /** 标题已更新（首次对话完成后自动生成） */
@@ -1341,12 +1470,6 @@ export const AGENT_IPC_CHANNELS = {
   // ExitPlanMode 计划审批
   /** ExitPlanMode 响应（渲染进程 → 主进程） */
   EXIT_PLAN_MODE_RESPOND: 'agent:exit-plan-mode:respond',
-
-  // Agent Teams 数据
-  /** 获取 Team 聚合数据（sdkSessionId → AgentTeamData | null） */
-  GET_TEAM_DATA: 'agent:get-team-data',
-  /** 读取 Teammate 输出文件（filePath → string） */
-  GET_AGENT_OUTPUT: 'agent:get-agent-output',
 
   // 队列消息（Agent 运行中排队发送）
   /** 排队发送消息 */

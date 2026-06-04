@@ -116,7 +116,9 @@ export function StickyUserMessage({ userMessages }: StickyUserMessageProps): Rea
     const el = scrollRef.current
     if (!el || !stickyMessage?.id) return
 
-    const target = el.querySelector<HTMLElement>(`[data-message-id="${stickyMessage.id}"]`)
+    const target = Array.from(el.querySelectorAll<HTMLElement>('[data-message-id]')).find(
+      (node) => node.getAttribute('data-message-id') === stickyMessage.id
+    )
     if (!target) return
 
     stopScroll()
@@ -148,7 +150,7 @@ export function StickyUserMessage({ userMessages }: StickyUserMessageProps): Rea
       {/* 复用 ConversationContent(px-8) + Message(px-2.5) 的 padding 链，保证与内容区等宽 */}
       <div className="mx-8 px-2.5 pt-2">
         <div
-          className="ml-[46px] rounded-xl bg-background/95 backdrop-blur-sm border border-border/40 shadow-sm cursor-pointer hover:bg-accent/50 transition-colors"
+          className="ml-[46px] rounded-xl bg-background/95 backdrop-blur-sm border border-border/50 shadow-sm cursor-pointer hover:bg-accent/50 transition-colors"
           onClick={scrollToOriginal}
         >
           <div className="px-3.5 py-2.5">
@@ -161,9 +163,9 @@ export function StickyUserMessage({ userMessages }: StickyUserMessageProps): Rea
 
             {/* 文本内容：最多两行，支持 Markdown 渲染 */}
             {stickyMessage?.text && (
-              <div className="text-sm text-foreground/80 line-clamp-2 leading-relaxed max-h-[3.25em]">
+              <div className="text-sm text-foreground/80 line-clamp-2 leading-relaxed">
                 <MessageResponse
-                  className="prose-p:my-0 prose-p:inline prose-headings:my-0 prose-headings:text-sm prose-pre:hidden prose-ul:my-0 prose-ol:my-0"
+                  className="prose-p:my-0 prose-p:inline prose-headings:my-0 prose-headings:text-sm prose-pre:hidden prose-ul:my-0 prose-ol:my-0 prose-li:my-0"
                   remarkPlugins={STICKY_REMARK_PLUGINS}
                 >
                   {stripCodeBlocks(stickyMessage.text)}

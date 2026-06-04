@@ -23,6 +23,7 @@ import {
   Keyboard,
   Mic,
   HardDriveDownload,
+  HardDrive,
 } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { settingsTabAtom, channelFormDirtyAtom, settingsCloseRequestedAtom } from "@/atoms/settings-tab";
@@ -53,6 +54,7 @@ import { TutorialViewer } from "../tutorial/TutorialViewer";
 import { ShortcutSettings } from "./ShortcutSettings";
 import { VoiceInputSettings } from "./VoiceInputSettings";
 import { MigrationSettings } from "./MigrationSettings";
+import { StorageSettings } from "./StorageSettings";
 
 /** 设置 Tab 定义 */
 interface TabItem {
@@ -104,6 +106,7 @@ const VOICE_INPUT_TAB: TabItem = {
 /** 尾部 Tabs */
 const TAIL_TABS: TabItem[] = [
   { id: "migration", label: "数据迁移", icon: <HardDriveDownload size={16} /> },
+  { id: "storage", label: "磁盘管理", icon: <HardDrive size={16} /> },
   { id: "appearance", label: "外观设置", icon: <Palette size={16} /> },
   { id: "about", label: "关于/更新", icon: <Info size={16} /> },
 ];
@@ -137,6 +140,8 @@ function renderTabContent(tab: SettingsTab): React.ReactElement {
       return <VoiceInputSettings />;
     case "migration":
       return <MigrationSettings />;
+    case "storage":
+      return <StorageSettings />;
   }
 }
 
@@ -250,7 +255,7 @@ export function SettingsPanel({
       {/* 下方主体：左导航 + 右内容 */}
       <div className="flex flex-1 min-h-0">
         {/* 左侧 Tab 导航 */}
-        <div className="w-[160px] border-r border-border/50 pt-3 px-2 flex-shrink-0">
+        <div className="w-[160px] border-r border-border/50 pt-3 px-2 flex-shrink-0 overflow-y-auto scrollbar-thin">
           <nav className="flex flex-col gap-0.5">
             {tabs.map((tab) => (
               <button

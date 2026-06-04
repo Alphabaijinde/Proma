@@ -14,9 +14,10 @@
  */
 
 import * as React from 'react'
+import { unstable_batchedUpdates } from 'react-dom'
 import { useAtom, useAtomValue, useSetAtom, useStore } from 'jotai'
 import { toast } from 'sonner'
-import { Bot, CornerDownLeft, Square, Settings, Paperclip, FolderPlus, X, Copy, Check, Brain, Map as MapIcon, Sparkles } from 'lucide-react'
+import { Bot, CornerDownLeft, Square, Settings, Paperclip, FolderPlus, X, Copy, Check, Brain, Sparkles, Eye } from 'lucide-react'
 import { AgentMessages } from './AgentMessages'
 import { AgentHeader } from './AgentHeader'
 import { ContextUsageBadge } from './ContextUsageBadge'
@@ -27,8 +28,10 @@ import { ExitPlanModeBanner } from './ExitPlanModeBanner'
 import { PlanModeDashedBorder } from './PlanModeDashedBorder'
 import { ModelSelector } from '@/components/chat/ModelSelector'
 import { AttachmentPreviewItem } from '@/components/chat/AttachmentPreviewItem'
+import { QuotedSelectionChip } from '@/components/diff/QuotedSelectionChip'
 import { RichTextInput } from '@/components/ai-elements/rich-text-input'
 import { SpeechButton } from '@/components/ai-elements/speech-button'
+import { InputToolbarOverflow, type ToolbarItem } from '@/components/ai-elements/InputToolbarOverflow'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -45,9 +48,11 @@ import {
 } from '@/components/ui/alert-dialog'
 import { cn } from '@/lib/utils'
 import { getActiveAccelerator, getAcceleratorDisplay } from '@/lib/shortcut-registry'
-import { FeishuNotifyToggle } from '@/components/chat/FeishuNotifyToggle'
+import { registerShortcut } from '@/lib/shortcut-registry'
+import { previewPanelOpenMapAtom, previewFileMapAtom, autoPreviewEnabledAtom, quotedSelectionMapAtom, currentQuotedSelectionAtom } from '@/atoms/preview-atoms'
 import {
   agentStreamingStatesAtom,
+  agentSessionStreamingStateAtomFamily,
   agentChannelIdAtom,
   agentModelIdAtom,
   agentChannelIdsAtom,
@@ -55,16 +60,23 @@ import {
   agentSessionModelMapAtom,
   currentAgentWorkspaceIdAtom,
   agentPendingPromptAtom,
-  agentPendingFilesAtom,
+  agentPendingFilesAtomFamily,
   agentWorkspacesAtom,
   agentStreamErrorsAtom,
   agentSessionDraftsAtom,
+  agentSessionDraftAtomFamily,
   agentSessionDraftHtmlAtom,
+  agentSessionDraftHtmlAtomFamily,
   agentPromptSuggestionsAtom,
   agentMessageRefreshAtom,
+  agentSDKMessagesCacheAtom,
+  setSessionMessagesCache,
+  agentDiffRefreshVersionAtom,
   agentSessionsAtom,
   agentAttachedDirectoriesMapAtom,
+  agentAttachedFilesMapAtom,
   workspaceAttachedDirectoriesMapAtom,
+  workspaceAttachedFilesMapAtom,
   liveMessagesMapAtom,
   agentThinkingAtom,
   stoppedByUserSessionsAtom,
@@ -76,6 +88,7 @@ import {
   allPendingAskUserRequestsAtom,
   allPendingExitPlanRequestsAtom,
   finalizeStreamingActivities,
+  agentProcessGroupsKeepExpandedAtom,
 } from '@/atoms/agent-atoms'
 import type { AgentContextStatus } from '@/atoms/agent-atoms'
 import { settingsOpenAtom } from '@/atoms/settings-tab'
@@ -84,11 +97,15 @@ import { useOpenSession } from '@/hooks/useOpenSession'
 import { AgentSessionProvider } from '@/contexts/session-context'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
 import { sendWithCmdEnterAtom } from '@/atoms/shortcut-atoms'
-import type { AgentSendInput, AgentPendingFile, ModelOption, SDKMessage } from '@proma/shared'
-import { fileToBase64 } from '@/lib/file-utils'
+import { activeTabIdAtom, getPreviewTabTitle, openTab, tabsAtom } from '@/atoms/tab-atoms'
+import type { AgentSendInput, AgentPendingFile, FileDialogLargeFile, ModelOption, SDKMessage } from '@proma/shared'
+import { MAX_ATTACHMENT_SIZE } from '@proma/shared'
+import { fileToBase64, formatFileNames, getFileParentPath } from '@/lib/file-utils'
+import { createClipboardPendingFile, createClipboardTextDraft, makeUniqueAttachmentName } from '@/lib/clipboard-text-attachment'
 
 /** 稳定的空 SDKMessage 数组引用，避免 ?? [] 每次创建新引用 */
 const EMPTY_SDK_MESSAGES: SDKMessage[] = []
+const LONG_TEXT_ATTACHMENT_THRESHOLD = 2000
 
 interface SDKMessageRecord {
   type?: string
@@ -200,18 +217,98 @@ function AgentThinkingPopover({ agentThinking, onToggle }: AgentThinkingPopoverP
   )
 }
 
-export function AgentView({ sessionId }: { sessionId: string }): React.ReactElement {
-  // [FLASH-DEBUG] 渲染计数器
-  const renderCountRef = React.useRef(0)
-  renderCountRef.current++
-  if (renderCountRef.current % 50 === 0) {
-    console.log(`[FLASH-DEBUG] AgentView(${sessionId.slice(0, 8)}) render #${renderCountRef.current}`)
-  }
+interface DisplayOptionsPopoverProps {
+  autoPreviewEnabled: boolean
+  processGroupsKeepExpanded: boolean
+  onAutoPreviewChange: (enabled: boolean) => void
+  onProcessGroupsKeepExpandedChange: (expanded: boolean) => void
+}
 
+function DisplayOptionsPopover({
+  autoPreviewEnabled,
+  processGroupsKeepExpanded,
+  onAutoPreviewChange,
+  onProcessGroupsKeepExpandedChange,
+}: DisplayOptionsPopoverProps): React.ReactElement {
+  const [open, setOpen] = React.useState(false)
+  const hasEnabledOption = autoPreviewEnabled || processGroupsKeepExpanded
+  const hoverTimeout = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const handleMouseEnter = React.useCallback(() => {
+    if (hoverTimeout.current) clearTimeout(hoverTimeout.current)
+    setOpen(true)
+  }, [])
+
+  const handleMouseLeave = React.useCallback(() => {
+    hoverTimeout.current = setTimeout(() => setOpen(false), 150)
+  }, [])
+
+  React.useEffect(() => {
+    return () => {
+      if (hoverTimeout.current) clearTimeout(hoverTimeout.current)
+    }
+  }, [])
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className={cn(
+            'size-[36px] rounded-full',
+            hasEnabledOption ? 'text-green-500' : 'text-foreground/60 hover:text-foreground'
+          )}
+          aria-label="显示选项"
+          onMouseEnter={handleMouseEnter}
+          onMouseLeave={handleMouseLeave}
+        >
+          <Eye className="size-5" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        side="top"
+        align="center"
+        sideOffset={8}
+        className="w-auto min-w-[190px] p-2 px-2.5"
+        onOpenAutoFocus={(e) => e.preventDefault()}
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+      >
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-xs text-foreground/70">自动预览修改中文件</span>
+            <Switch
+              checked={autoPreviewEnabled}
+              onCheckedChange={onAutoPreviewChange}
+              className="h-4 w-7 [&>span]:size-3 [&>span]:data-[state=checked]:translate-x-3"
+            />
+          </div>
+          <div className="h-px bg-border" />
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-xs text-foreground/70">输出完保持展开</span>
+            <Switch
+              checked={processGroupsKeepExpanded}
+              onCheckedChange={onProcessGroupsKeepExpandedChange}
+              className="h-4 w-7 [&>span]:size-3 [&>span]:data-[state=checked]:translate-x-3"
+            />
+          </div>
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+export function AgentView({ sessionId }: { sessionId: string }): React.ReactElement {
   const [persistedSDKMessages, setPersistedSDKMessages] = React.useState<SDKMessage[]>([])
+  const persistedSDKMessagesRef = React.useRef<SDKMessage[]>([])
+  persistedSDKMessagesRef.current = persistedSDKMessages
   const setStreamingStates = useSetAtom(agentStreamingStatesAtom)
-  const streamingStates = useAtomValue(agentStreamingStatesAtom)
-  const streamState = streamingStates.get(sessionId)
+  // 按 sessionId 切片订阅：仅本 session 的 streaming state 变化才让 AgentView 重渲染。
+  // 流式期间其他 session 的高频更新（每 token 一次）通过 base map atom 传播但派生
+  // atom 输出引用未变，订阅者跳过通知。
+  const streamState = useAtomValue(agentSessionStreamingStateAtomFamily(sessionId))
   const streaming = streamState?.running ?? false
   const stoppedByUserSessions = useAtomValue(stoppedByUserSessionsAtom)
   const sendWithCmdEnter = useAtomValue(sendWithCmdEnterAtom)
@@ -243,17 +340,19 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     return meta.workspaceId ?? null     // 数据已加载，以会话自身为准
   }, [sessions, sessionId, globalWorkspaceId])
   const [pendingPrompt, setPendingPrompt] = useAtom(agentPendingPromptAtom)
-  const [pendingFiles, setPendingFiles] = useAtom(agentPendingFilesAtom)
+  const [pendingFiles, setPendingFiles] = useAtom(agentPendingFilesAtomFamily(sessionId))
   const workspaces = useAtomValue(agentWorkspacesAtom)
   // 保持 channelId 稳定：初始化前使用上次有效值，避免工具栏抖动
   const stableChannelIdRef = React.useRef(agentChannelId)
   if (agentChannelId) stableChannelIdRef.current = agentChannelId
   const stableChannelId = agentChannelId ?? stableChannelIdRef.current
 
-  // 已有会话首次打开时，从全局默认值初始化 per-session map
+  // 已有会话首次打开时，从全局默认值初始化 per-session map。
+  // setter 内的 `prev.has(sessionId)` 守卫保证幂等，外层不再订阅 Map atom，
+  // 避免 setter 写入 → atom 引用变化 → effect 重跑的自循环（React #185）。
   React.useEffect(() => {
     if (!sessionId) return
-    if (!sessionChannelMap.has(sessionId) && defaultChannelId) {
+    if (defaultChannelId) {
       setSessionChannelMap((prev) => {
         if (prev.has(sessionId)) return prev
         const map = new Map(prev)
@@ -261,7 +360,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         return map
       })
     }
-    if (!sessionModelMap.has(sessionId) && defaultModelId) {
+    if (defaultModelId) {
       setSessionModelMap((prev) => {
         if (prev.has(sessionId)) return prev
         const map = new Map(prev)
@@ -269,7 +368,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         return map
       })
     }
-  }, [sessionId, sessionChannelMap, sessionModelMap, defaultChannelId, defaultModelId, setSessionChannelMap, setSessionModelMap])
+  }, [sessionId, defaultChannelId, defaultModelId, setSessionChannelMap, setSessionModelMap])
 
   const contextStatus: AgentContextStatus = {
     isCompacting: streamState?.isCompacting ?? false,
@@ -287,6 +386,19 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const permissionMode = permissionModeMap.get(sessionId) ?? persistedPermissionMode ?? defaultPermissionMode
   const isPermissionPlanMode = permissionMode === 'plan'
   const store = useStore()
+  const currentQuotedSelection = useAtomValue(currentQuotedSelectionAtom)
+  const setQuotedSelectionMap = useSetAtom(quotedSelectionMapAtom)
+
+  /** 移除当前引用选中文本 */
+  const handleRemoveQuotedSelection = React.useCallback(() => {
+    setQuotedSelectionMap((prev) => {
+      const m = new Map(prev)
+      m.delete(sessionId)
+      return m
+    })
+  }, [sessionId, setQuotedSelectionMap])
+
+  const setPreviewFileMap = useSetAtom(previewFileMapAtom)
   const suggestionsMap = useAtomValue(agentPromptSuggestionsAtom)
   const suggestion = suggestionsMap.get(sessionId) ?? null
   const setPromptSuggestions = useSetAtom(agentPromptSuggestionsAtom)
@@ -295,12 +407,19 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const setAttachedDirsMap = useSetAtom(agentAttachedDirectoriesMapAtom)
   const attachedDirsMap = useAtomValue(agentAttachedDirectoriesMapAtom)
   const attachedDirs = attachedDirsMap.get(sessionId) ?? []
+  const setAttachedFilesMap = useSetAtom(agentAttachedFilesMapAtom)
+  const attachedFilesMap = useAtomValue(agentAttachedFilesMapAtom)
+  const attachedFiles = attachedFilesMap.get(sessionId) ?? []
   const wsAttachedDirsMap = useAtomValue(workspaceAttachedDirectoriesMapAtom)
   const wsAttachedDirs = currentWorkspaceId ? (wsAttachedDirsMap.get(currentWorkspaceId) ?? []) : []
+  const setWsAttachedFilesMap = useSetAtom(workspaceAttachedFilesMapAtom)
+  const wsAttachedFilesMap = useAtomValue(workspaceAttachedFilesMapAtom)
+  const wsAttachedFiles = currentWorkspaceId ? (wsAttachedFilesMap.get(currentWorkspaceId) ?? []) : []
 
-  const draftsMap = useAtomValue(agentSessionDraftsAtom)
+  // 按 sessionId 切片订阅 drafts/draftHtml：仅本 session 草稿变化才让 AgentView 重渲染。
+  // 输入框每次按键都会写整 Map atom，若直接订阅整 Map，AgentView 跟着每键重渲染。
+  const inputContent = useAtomValue(agentSessionDraftAtomFamily(sessionId))
   const setDraftsMap = useSetAtom(agentSessionDraftsAtom)
-  const inputContent = draftsMap.get(sessionId) ?? ''
   const setInputContent = React.useCallback((value: string) => {
     setDraftsMap((prev) => {
       const map = new Map(prev)
@@ -312,9 +431,8 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       return map
     })
   }, [sessionId, setDraftsMap])
-  const draftHtmlMap = useAtomValue(agentSessionDraftHtmlAtom)
+  const inputHtmlContent = useAtomValue(agentSessionDraftHtmlAtomFamily(sessionId))
   const setDraftHtmlMap = useSetAtom(agentSessionDraftHtmlAtom)
-  const inputHtmlContent = draftHtmlMap.get(sessionId) ?? ''
   const setInputHtmlContent = React.useCallback((html: string) => {
     setDraftHtmlMap((prev) => {
       const map = new Map(prev)
@@ -362,18 +480,22 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     const firstModel = channel.models.find((m) => m.enabled)
     if (!firstModel) return
 
-    // 更新 per-session map
+    // 更新 per-session map（带幂等守卫，避免无意义写入导致 effect 自循环）
     setSessionModelMap((prev) => {
+      if (prev.get(sessionId) === firstModel.id) return prev
       const map = new Map(prev)
       map.set(sessionId, firstModel.id)
       return map
     })
-    // 同步全局默认值
-    setDefaultModelId(firstModel.id)
-    window.electronAPI.updateSettings({
-      agentChannelId,
-      agentModelId: firstModel.id,
-    }).catch(console.error)
+    // 全局默认值 + 持久化 IPC 也加幂等：firstModel 与当前 defaultModelId 相同时跳过，
+    // 避免每次 agentChannelId / globalChannels 变化都重复写盘和触发 agentModelIdAtom 更新。
+    if (defaultModelId !== firstModel.id) {
+      setDefaultModelId(firstModel.id)
+      window.electronAPI.updateSettings({
+        agentChannelId,
+        agentModelId: firstModel.id,
+      }).catch(console.error)
+    }
   }, [agentChannelId, agentModelId, globalChannels, sessionId, setSessionModelMap, setDefaultModelId])
 
   // 获取当前 session 的工作路径（文件浏览器需要）
@@ -426,6 +548,21 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       .catch(() => setWorkspaceFilesPath(null))
   }, [workspaceSlug])
 
+  // 获取工作区级附加文件（@ 引用和路径解析都需要）
+  React.useEffect(() => {
+    if (!workspaceSlug || !currentWorkspaceId) return
+    window.electronAPI
+      .getWorkspaceAttachedFiles(workspaceSlug)
+      .then((files) => {
+        setWsAttachedFilesMap((prev) => {
+          const map = new Map(prev)
+          map.set(currentWorkspaceId, files)
+          return map
+        })
+      })
+      .catch(console.error)
+  }, [workspaceSlug, currentWorkspaceId, setWsAttachedFilesMap])
+
   // 工作区级目录（workspace shared files + 工作区级附加目录），@ 引用标记为工作区文件
   const workspaceDirs = React.useMemo(() => {
     const dirs: string[] = []
@@ -436,64 +573,134 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     return dirs
   }, [workspaceFilesPath, wsAttachedDirs])
 
+  const attachedFileDirectories = React.useMemo(() => {
+    const dirs: string[] = []
+    for (const filePath of [...attachedFiles, ...wsAttachedFiles]) {
+      const parent = getFileParentPath(filePath)
+      if (parent && !dirs.includes(parent)) dirs.push(parent)
+    }
+    return dirs
+  }, [attachedFiles, wsAttachedFiles])
+
+  const workspaceMentionPaths = React.useMemo(() => {
+    const paths = [...workspaceDirs]
+    for (const filePath of wsAttachedFiles) {
+      if (!paths.includes(filePath)) paths.push(filePath)
+    }
+    return paths
+  }, [workspaceDirs, wsAttachedFiles])
+
+  const sessionMentionPaths = React.useMemo(() => {
+    const paths = [...attachedDirs]
+    for (const filePath of attachedFiles) {
+      if (!paths.includes(filePath)) paths.push(filePath)
+    }
+    return paths
+  }, [attachedDirs, attachedFiles])
+
+  // 合并会话级 + 工作区级附加目录，供消息区文件路径解析使用
+  const allAttachedDirs = React.useMemo(() => {
+    const dirs = [...attachedDirs]
+    for (const d of workspaceDirs) {
+      if (d && !dirs.includes(d)) dirs.push(d)
+    }
+    for (const filePath of [...attachedFiles, ...wsAttachedFiles]) {
+      if (filePath && !dirs.includes(filePath)) dirs.push(filePath)
+      const parent = getFileParentPath(filePath)
+      if (parent && !dirs.includes(parent)) dirs.push(parent)
+    }
+    return dirs
+  }, [attachedDirs, workspaceDirs, attachedFiles, wsAttachedFiles])
+
   // 监听消息刷新版本号
   const refreshMap = useAtomValue(agentMessageRefreshAtom)
   const refreshVersion = refreshMap.get(sessionId) ?? 0
 
+  // 持久化消息缓存 setter — 仅写入，读取时用 store.get 同步取值避免订阅触发重渲染
+  const setMessagesCache = useSetAtom(agentSDKMessagesCacheAtom)
+  const appendOptimisticPersistedMessage = React.useCallback((message: SDKMessage) => {
+    // 切会话时优先命中内存缓存，因此乐观插入的用户消息也要同步写入缓存，
+    // 否则“发送后立刻切走再切回”会短暂回退到旧消息数组。
+    const next = [...persistedSDKMessagesRef.current, message]
+    persistedSDKMessagesRef.current = next
+    setPersistedSDKMessages(next)
+    setMessagesCache((prev) => setSessionMessagesCache(prev, sessionId, next))
+  }, [sessionId, setMessagesCache])
+
   // 消息是否已完成首次加载（用于 auto-send 等待）
   const [messagesLoaded, setMessagesLoaded] = React.useState(false)
+  const loadingSessionIdRef = React.useRef<string | null>(null)
 
   // 加载当前会话消息
   React.useEffect(() => {
-    // 流式运行中不重置 messagesLoaded，避免 streaming UI 消失后出现空窗闪烁
-    const isCurrentlyStreaming = store.get(agentStreamingStatesAtom).get(sessionId)?.running ?? false
-    if (!isCurrentlyStreaming) {
-      setMessagesLoaded(false)
+    // 只有切换会话时才进入 loading 态；同一会话在流式完成后的刷新要保留当前
+    // persisted/live 消息，避免“助手气泡先消失、持久化消息再恢复”的空窗跳动。
+    const isSessionSwitch = loadingSessionIdRef.current !== sessionId
+    if (isSessionSwitch) {
+      loadingSessionIdRef.current = sessionId
+      // 命中缓存则立即填充，消除「先清空 → 等 IPC 全量读盘」的可见空窗；
+      // IPC 返回后仍会以最新数据覆盖。未命中才回退到清空 + loading 态。
+      // 注意：refreshVersion bump（流结束/出错/rewind）不是会话切换，
+      // 走 else 分支保留当前消息，并在下方 IPC 覆盖时获得最新数据。
+      const cached = store.get(agentSDKMessagesCacheAtom).get(sessionId)
+      if (cached) {
+        setPersistedSDKMessages(cached)
+        setMessagesLoaded(true)
+      } else {
+        setPersistedSDKMessages([])
+        setMessagesLoaded(false)
+      }
     }
+    let cancelled = false
     window.electronAPI.getAgentSessionSDKMessages(sessionId)
       .then((sdkMsgs) => {
-        setPersistedSDKMessages(sdkMsgs)
-        setMessagesLoaded(true)
+        if (cancelled) return
+        // 写入缓存（含 LRU 淘汰，防止会话数增长导致内存无限膨胀）
+        setMessagesCache((prev) => setSessionMessagesCache(prev, sessionId, sdkMsgs))
+        unstable_batchedUpdates(() => {
+          setPersistedSDKMessages(sdkMsgs)
+          setMessagesLoaded(true)
 
-        // 消息加载完成后，同步清除流式展示状态和实时消息，
-        // 确保 React 在一次渲染中同时显示持久化消息并移除流式气泡/实时消息，
-        // 避免「实时消息已清 → 持久化消息未到」的空档闪烁
-        // 注意：保留 inputTokens/contextWindow 以维持上下文用量圆环显示
-        setStreamingStates((prev) => {
-          const state = prev.get(sessionId)
-          if (!state || state.running) return prev  // 仍在运行中，不清除
-          const map = new Map(prev)
-          if (state.inputTokens !== undefined) {
-            // 保留 usage 数据，仅清除流式展示字段
-            map.set(sessionId, {
-              running: false,
-              content: '',
-              toolActivities: [],
-              teammates: [],
-              inputTokens: state.inputTokens,
-              outputTokens: state.outputTokens,
-              cacheReadTokens: state.cacheReadTokens,
-              cacheCreationTokens: state.cacheCreationTokens,
-              contextWindow: state.contextWindow,
-              model: state.model,
-            })
-          } else {
+          // 消息加载完成后，同步清除流式展示状态和实时消息，
+          // 确保 React 在一次渲染中同时显示持久化消息并移除流式气泡/实时消息，
+          // 避免「实时消息已清 → 持久化消息未到」的空档闪烁
+          // 注意：保留 inputTokens/contextWindow 以维持上下文用量圆环显示
+          setStreamingStates((prev) => {
+            const state = prev.get(sessionId)
+            if (!state || state.running) return prev  // 仍在运行中，不清除
+            const map = new Map(prev)
+            if (state.inputTokens !== undefined) {
+              // 保留 usage 数据，仅清除流式展示字段
+              map.set(sessionId, {
+                running: false,
+                content: '',
+                toolActivities: [],
+                inputTokens: state.inputTokens,
+                outputTokens: state.outputTokens,
+                cacheReadTokens: state.cacheReadTokens,
+                cacheCreationTokens: state.cacheCreationTokens,
+                contextWindow: state.contextWindow,
+                model: state.model,
+              })
+            } else {
+              map.delete(sessionId)
+            }
+            return map
+          })
+          setLiveMessagesMap((prev) => {
+            if (!prev.has(sessionId)) return prev
+            // 仍在运行中，不清除实时消息（与 streamingStates 保护逻辑一致）
+            const streamingState = store.get(agentStreamingStatesAtom).get(sessionId)
+            if (streamingState?.running) return prev
+            const map = new Map(prev)
             map.delete(sessionId)
-          }
-          return map
-        })
-        setLiveMessagesMap((prev) => {
-          if (!prev.has(sessionId)) return prev
-          // 仍在运行中，不清除实时消息（与 streamingStates 保护逻辑一致）
-          const streamingState = store.get(agentStreamingStatesAtom).get(sessionId)
-          if (streamingState?.running) return prev
-          const map = new Map(prev)
-          map.delete(sessionId)
-          return map
+            return map
+          })
         })
       })
       .catch(console.error)
-  }, [sessionId, refreshVersion, setStreamingStates, setLiveMessagesMap, store])
+    return () => { cancelled = true }
+  }, [sessionId, refreshVersion, setStreamingStates, setLiveMessagesMap, setMessagesCache, store])
 
   // 从会话元数据初始化附加目录（仅冷启动水合，后续由 handleAttachFolder/handleDetachDirectory 实时写入）
   React.useEffect(() => {
@@ -510,6 +717,21 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     })
   }, [sessionId, sessions, setAttachedDirsMap])
 
+  // 从会话元数据初始化附加文件（仅冷启动水合，后续由 attachFile/detachFile 实时写入）
+  React.useEffect(() => {
+    const meta = sessions.find((s) => s.id === sessionId)
+    const files = meta?.attachedFiles ?? []
+    setAttachedFilesMap((prev) => {
+      const existing = prev.get(sessionId)
+      if (existing != null) return prev
+      const map = new Map(prev)
+      if (files.length > 0) {
+        map.set(sessionId, files)
+      }
+      return map
+    })
+  }, [sessionId, sessions, setAttachedFilesMap])
+
   // 自动发送 pending prompt（从快速任务窗口或设置页触发）
   // 等待 messagesLoaded 确保消息加载完成后再插入乐观消息，避免被加载结果覆盖。
   // 使用 queueMicrotask 延迟发送：避免 setState → 重渲染 → cleanup 取消 timer 的竞态。
@@ -525,6 +747,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       channelId: agentChannelId,
       modelId: agentModelId || undefined,
       workspaceId: currentWorkspaceId || undefined,
+      additionalDirectories: Array.from(new Set([...attachedDirs, ...attachedFileDirectories, ...(pendingPrompt.additionalDirectories ?? [])])),
     }
     setPendingPrompt(null)
 
@@ -538,7 +761,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           running: true,
           content: '',
           toolActivities: [],
-          teammates: [],
           model: snapshot.modelId,
           startedAt: streamStartedAt,
           inputTokens: existing?.inputTokens,
@@ -556,7 +778,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         parent_tool_use_id: null,
         _createdAt: Date.now(),
       } as unknown as SDKMessage
-      setPersistedSDKMessages((prev) => [...prev, tempUserSDKMsg])
+      appendOptimisticPersistedMessage(tempUserSDKMsg)
 
       // 发送消息
       const input: AgentSendInput = {
@@ -567,6 +789,9 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         workspaceId: snapshot.workspaceId,
         startedAt: streamStartedAt,
         permissionModeOverride: permissionMode,
+        ...(snapshot.additionalDirectories && snapshot.additionalDirectories.length > 0 && {
+          additionalDirectories: snapshot.additionalDirectories,
+        }),
       }
       window.electronAPI.sendAgentMessage(input).catch((error) => {
         console.error('[AgentView] 自动发送配置消息失败:', error)
@@ -579,29 +804,59 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         })
       })
     })
-  }, [messagesLoaded, pendingPrompt, sessionId, agentChannelId, agentModelId, currentWorkspaceId, streaming, setPendingPrompt, setStreamingStates, permissionMode])
+  }, [messagesLoaded, pendingPrompt, sessionId, agentChannelId, agentModelId, currentWorkspaceId, streaming, setPendingPrompt, setStreamingStates, permissionMode, attachedDirs, attachedFileDirectories])
   // ===== 附件处理 =====
 
   /** 为文件生成唯一文件名（避免粘贴多张图片时文件名重复导致覆盖） */
   const makeUniqueFilename = React.useCallback((originalName: string, existingNames: string[]): string => {
-    if (!existingNames.includes(originalName)) return originalName
-    const dotIdx = originalName.lastIndexOf('.')
-    const baseName = dotIdx > 0 ? originalName.slice(0, dotIdx) : originalName
-    const ext = dotIdx > 0 ? originalName.slice(dotIdx) : ''
-    let counter = 1
-    while (existingNames.includes(`${baseName}-${counter}${ext}`)) {
-      counter++
-    }
-    return `${baseName}-${counter}${ext}`
+    return makeUniqueAttachmentName(originalName, existingNames)
   }, [])
 
+  const attachSessionFile = React.useCallback(async (filePath: string): Promise<void> => {
+    const updated = await window.electronAPI.attachFile({ sessionId, filePath })
+    setAttachedFilesMap((prev) => {
+      const map = new Map(prev)
+      map.set(sessionId, updated)
+      return map
+    })
+  }, [sessionId, setAttachedFilesMap])
+
   /** 将 File 对象列表添加为待发送附件 */
-  const addFilesAsAttachments = React.useCallback(async (files: File[]): Promise<void> => {
+  const addFilesAsAttachments = React.useCallback(async (files: File[], sourcePaths?: Map<File, string>): Promise<void> => {
     // 收集已有的 pending 文件名，用于去重
     const usedNames: string[] = pendingFilesRef.current.map((f) => f.filename)
 
+    const pathBackedFiles: string[] = []
+    const rejectedLargeFiles: string[] = []
+
     for (const file of files) {
       try {
+        if (file.size > MAX_ATTACHMENT_SIZE) {
+          const sourcePath = sourcePaths?.get(file)
+          if (!sourcePath) {
+            rejectedLargeFiles.push(file.name)
+            continue
+          }
+          await attachSessionFile(sourcePath)
+
+          const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined
+          const uniqueFilename = makeUniqueFilename(file.name, usedNames)
+          usedNames.push(uniqueFilename)
+
+          const pending: AgentPendingFile = {
+            id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            filename: uniqueFilename,
+            mediaType: file.type || 'application/octet-stream',
+            size: file.size,
+            previewUrl,
+            sourcePath,
+          }
+
+          setPendingFiles((prev) => [...prev, pending])
+          pathBackedFiles.push(uniqueFilename)
+          continue
+        }
+
         const base64 = await fileToBase64(file)
         const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined
         const uniqueFilename = makeUniqueFilename(file.name, usedNames)
@@ -625,15 +880,66 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         console.error('[AgentView] 添加附件失败:', error)
       }
     }
-  }, [makeUniqueFilename, setPendingFiles])
+
+    if (pathBackedFiles.length > 0) {
+      toast.success(`已将大文件作为附加文件引用：${formatFileNames(pathBackedFiles)}`)
+    }
+    if (rejectedLargeFiles.length > 0) {
+      toast.error(`以下文件超过 100MB 且无法取得本地路径，已跳过：${formatFileNames(rejectedLargeFiles)}`)
+    }
+  }, [attachSessionFile, makeUniqueFilename, setPendingFiles])
+
+  const addLargeDialogFilesAsReferences = React.useCallback(async (files: FileDialogLargeFile[]): Promise<void> => {
+    if (files.length === 0) return
+    const usedNames: string[] = pendingFilesRef.current.map((f) => f.filename)
+    const added: string[] = []
+    const rejected: string[] = []
+
+    for (const file of files) {
+      try {
+        await attachSessionFile(file.path)
+        const uniqueFilename = makeUniqueFilename(file.filename, usedNames)
+        usedNames.push(uniqueFilename)
+
+        const pending: AgentPendingFile = {
+          id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          filename: uniqueFilename,
+          mediaType: file.mediaType,
+          size: file.size,
+          sourcePath: file.path,
+        }
+
+        setPendingFiles((prev) => [...prev, pending])
+        added.push(uniqueFilename)
+      } catch (error) {
+        console.error('[AgentView] 附加大文件失败:', error)
+        rejected.push(file.filename)
+      }
+    }
+
+    if (added.length > 0) {
+      toast.success(`已将大文件作为附加文件引用：${formatFileNames(added)}`)
+    }
+    if (rejected.length > 0) {
+      toast.error(`以下文件附加失败，已跳过：${formatFileNames(rejected)}`)
+    }
+  }, [attachSessionFile, makeUniqueFilename, setPendingFiles])
 
   /** 打开文件选择对话框 */
   const handleOpenFileDialog = React.useCallback(async (): Promise<void> => {
     try {
       const result = await window.electronAPI.openFileDialog()
-      if (result.files.length === 0) return
+      const largeFiles = result.largeFiles ?? []
+      const skippedFiles = result.skippedFiles ?? []
+      if (result.files.length === 0 && largeFiles.length === 0 && skippedFiles.length === 0) return
+
+      const oversized: string[] = []
 
       for (const fileInfo of result.files) {
+        if (fileInfo.size > MAX_ATTACHMENT_SIZE) {
+          oversized.push(fileInfo.filename)
+          continue
+        }
         const previewUrl = fileInfo.mediaType.startsWith('image/')
           ? `data:${fileInfo.mediaType};base64,${fileInfo.data}`
           : undefined
@@ -653,10 +959,18 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
 
         setPendingFiles((prev) => [...prev, pending])
       }
+
+      if (oversized.length > 0) {
+        toast.error(`以下文件超过 100MB 且无法取得本地路径，已跳过：${formatFileNames(oversized)}`)
+      }
+      await addLargeDialogFilesAsReferences(largeFiles)
+      if (skippedFiles.length > 0) {
+        toast.warning(`以下文件无法读取，已跳过：${formatFileNames(skippedFiles.map((f) => f.filename))}`)
+      }
     } catch (error) {
       console.error('[AgentView] 文件选择对话框失败:', error)
     }
-  }, [setPendingFiles])
+  }, [addLargeDialogFilesAsReferences, setPendingFiles])
 
   /** 附加文件夹（不复制，仅记录路径） */
   const handleAttachFolder = React.useCallback(async (): Promise<void> => {
@@ -694,10 +1008,91 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     })
   }, [setPendingFiles])
 
+  const openClipboardPreviewFile = React.useCallback((filePath: string): void => {
+    const parentPath = getFileParentPath(filePath)
+    setPreviewFileMap((prev) => {
+      const m = new Map(prev)
+      m.set(sessionId, {
+        filePath,
+        previewOnly: true,
+        readOnly: false,
+        basePaths: parentPath ? [parentPath] : undefined,
+      })
+      return m
+    })
+    store.set(previewPanelOpenMapAtom, (prev) => {
+      const m = new Map(prev)
+      m.set(sessionId, false)
+      return m
+    })
+    const result = openTab(store.get(tabsAtom), {
+      type: 'preview',
+      sessionId,
+      title: getPreviewTabTitle(filePath),
+    })
+    store.set(tabsAtom, result.tabs)
+    store.set(activeTabIdAtom, result.activeTabId)
+  }, [sessionId, setPreviewFileMap, store])
+
+  /** 点击 clipboard 附件时，在当前会话的临时预览标签页中显示内容 */
+  const handleClipboardPreview = React.useCallback(async (file: AgentPendingFile) => {
+    if (file.sourcePath) {
+      openClipboardPreviewFile(file.sourcePath)
+      return
+    }
+
+    const base64 = window.__pendingAgentFileData?.get(file.id)
+    if (!base64) return
+
+    try {
+      // atob 解码得到二进制字符串，需用 TextDecoder 正确还原 UTF-8 文本
+      const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+      const text = new TextDecoder('utf-8').decode(bytes)
+      const tmpPath = await window.electronAPI.writeClipboardPreview(file.filename, text)
+      setPendingFiles((prev) => prev.map((item) => (
+        item.id === file.id ? { ...item, sourcePath: tmpPath, isClipboardDraft: true } : item
+      )))
+      window.__pendingAgentFileData?.delete(file.id)
+      openClipboardPreviewFile(tmpPath)
+    } catch (error) {
+      console.error('[AgentView] clipboard 预览写入失败:', error)
+    }
+  }, [openClipboardPreviewFile, setPendingFiles])
+
+  const addClipboardTextDraft = React.useCallback(async (text: string): Promise<AgentPendingFile> => {
+    const draft = createClipboardTextDraft(text, pendingFilesRef.current.map((f) => f.filename))
+    const tmpPath = await window.electronAPI.writeClipboardPreview(draft.filename, text)
+    const pending = createClipboardPendingFile(
+      draft,
+      tmpPath,
+      `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    )
+    setPendingFiles((prev) => {
+      const next = [...prev, pending]
+      pendingFilesRef.current = next
+      return next
+    })
+    return pending
+  }, [setPendingFiles])
+
   /** 粘贴文件处理 */
   const handlePasteFiles = React.useCallback((files: File[]): void => {
     addFilesAsAttachments(files)
   }, [addFilesAsAttachments])
+
+  /** 粘贴超长文本时转为待发送附件，避免把大段内容直接塞进输入框 */
+  const handlePasteLongText = React.useCallback((text: string): void => {
+    addClipboardTextDraft(text)
+      .then((file) => {
+        toast.success('已将超长文本转为附件', {
+          description: `${file.filename}，点击附件可预览编辑。`,
+        })
+      })
+      .catch((error) => {
+        console.error('[AgentView] 超长文本转附件失败:', error)
+        toast.error('超长文本转附件失败')
+      })
+  }, [addClipboardTextDraft])
 
   /** 拖放处理 */
   const handleDragOver = React.useCallback((e: React.DragEvent): void => {
@@ -760,7 +1155,12 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         // 普通文件作为附件
         const regularFiles = filePaths.map((p) => pathMap.get(p)!).filter(Boolean)
         if (regularFiles.length > 0) {
-          addFilesAsAttachments(regularFiles)
+          const fileSourcePaths = new Map<File, string>()
+          for (const path of filePaths) {
+            const file = pathMap.get(path)
+            if (file) fileSourcePaths.set(file, path)
+          }
+          addFilesAsAttachments(regularFiles, fileSourcePaths)
         }
       } catch (error) {
         console.error('[AgentView] 路径检测失败，回退处理:', error)
@@ -817,12 +1217,17 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     const text = inputContent.trim()
     // 如果输入为空但有建议，使用建议内容
     const effectiveText = text || suggestion || ''
-    if ((!effectiveText && pendingFiles.length === 0) || !agentChannelId || !hasAvailableModel) return
+    const pendingFilesSnapshot = pendingFilesRef.current
+    if (!messagesLoaded || (!effectiveText && pendingFilesSnapshot.length === 0) || !agentChannelId || !hasAvailableModel) return
+    const additionalDirectoriesForRun = new Set(attachedDirs)
+    for (const dir of attachedFileDirectories) {
+      additionalDirectoriesForRun.add(dir)
+    }
 
     // 上一条消息仍在处理中，直接追加发送
     if (streaming) {
       // 流式追加时不处理附件（仅支持纯文本）
-      if (pendingFiles.length > 0) {
+      if (pendingFilesSnapshot.length > 0) {
         toast.info('Agent 运行中暂不支持追加发送附件', {
           description: '请等待完成后再发送附件，或先撤除附件仅发送文本',
         })
@@ -899,50 +1304,132 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
 
     // 1. 如果有 pending 文件，先保存到 session 目录
     let fileReferences = ''
-    if (pendingFiles.length > 0) {
+    if (pendingFilesSnapshot.length > 0) {
       const workspace = workspaces.find((w) => w.id === currentWorkspaceId)
-      if (workspace) {
-        // 区分：已有 sourcePath 的文件（从侧面板添加）直接引用，其余需要保存
-        const existingFiles = pendingFiles.filter((f) => f.sourcePath)
-        const newFiles = pendingFiles.filter((f) => !f.sourcePath)
+      if (!workspace) {
+        toast.warning('暂时无法发送附件', {
+          description: '当前 Agent 会话没有绑定有效工作区。请在顶部选择工作区，或新建 Agent 会话后重新上传。',
+        })
+        return
+      }
 
-        const allRefs: Array<{ filename: string; targetPath: string }> = []
+      // 区分三类：
+      // - 剪贴板临时草稿（isClipboardDraft）：sourcePath 指向 os.tmpdir，可能被系统清理，
+      //   需读取最新内容（含预览面板 autosave 的编辑）拷贝进 session 目录持久化
+      // - 侧面板真实文件（仅 sourcePath）：原地引用，不复制
+      // - 新上传文件（无 sourcePath）：从内存数据保存到 session 目录
+      const existingFiles = pendingFilesSnapshot.filter((f) => f.sourcePath && !f.isClipboardDraft)
+      const clipboardDrafts = pendingFilesSnapshot.filter((f) => f.sourcePath && f.isClipboardDraft)
+      const newFiles = pendingFilesSnapshot.filter((f) => !f.sourcePath)
 
-        // 已有路径的文件直接引用
-        for (const f of existingFiles) {
-          allRefs.push({ filename: f.filename, targetPath: f.sourcePath! })
-        }
+      const allRefs: Array<{ filename: string; targetPath: string }> = []
 
-        // 新上传的文件保存到 session 目录
-        if (newFiles.length > 0) {
-          const filesToSave = newFiles.map((f) => ({
-            filename: f.filename,
-            data: window.__pendingAgentFileData?.get(f.id) || '',
-          }))
-          try {
-            const saved = await window.electronAPI.saveFilesToAgentSession({
-              workspaceSlug: workspace.slug,
-              sessionId,
-              files: filesToSave,
-            })
-            allRefs.push(...saved)
-          } catch (error) {
-            console.error('[AgentView] 保存附件到 session 失败:', error)
+      // 已有路径的文件直接引用
+      for (const f of existingFiles) {
+        const sourcePath = f.sourcePath!
+        allRefs.push({ filename: f.filename, targetPath: sourcePath })
+        const parentPath = getFileParentPath(sourcePath)
+        if (parentPath) additionalDirectoriesForRun.add(parentPath)
+      }
+
+      // 剪贴板草稿：读取临时文件最新内容，转为待保存数据
+      const draftFilesToSave: Array<{ filename: string; data: string }> = []
+      const staleDraftFiles: string[] = []
+      for (const f of clipboardDrafts) {
+        const sourcePath = f.sourcePath!
+        const parentPath = getFileParentPath(sourcePath)
+        try {
+          const read = await window.electronAPI.resolveAndReadFile(sourcePath, {
+            sessionId,
+            candidateBasePaths: parentPath ? [parentPath] : undefined,
+          })
+          if (!read) {
+            staleDraftFiles.push(f.filename)
+            continue
           }
+          const data = await fileToBase64(new File([read.content], f.filename, { type: f.mediaType }))
+          draftFilesToSave.push({ filename: f.filename, data })
+        } catch (error) {
+          console.error('[AgentView] 读取剪贴板草稿失败:', error)
+          staleDraftFiles.push(f.filename)
         }
+      }
+      if (staleDraftFiles.length > 0) {
+        toast.error('附件数据已失效', {
+          description: `请移除后重新粘贴：${staleDraftFiles.join('、')}`,
+        })
+        return
+      }
 
-        if (allRefs.length > 0) {
-          const refs = allRefs.map((f) => `- ${f.filename}: ${f.targetPath}`).join('\n')
-          fileReferences += `<attached_files>\n${refs}\n</attached_files>\n\n`
+      // 新上传的文件 + 剪贴板草稿一并保存到 session 目录
+      const inMemoryFilesToSave = newFiles.map((f) => ({
+        filename: f.filename,
+        data: window.__pendingAgentFileData?.get(f.id) || '',
+      }))
+      const missingDataFiles = inMemoryFilesToSave.filter((f) => !f.data).map((f) => f.filename)
+      if (missingDataFiles.length > 0) {
+        toast.error('附件数据已失效', {
+          description: `请移除后重新添加文件：${missingDataFiles.join('、')}`,
+        })
+        return
+      }
+
+      const filesToSave = [...inMemoryFilesToSave, ...draftFilesToSave]
+      if (filesToSave.length > 0) {
+        try {
+          const saved = await window.electronAPI.saveFilesToAgentSession({
+            workspaceSlug: workspace.slug,
+            sessionId,
+            files: filesToSave,
+          })
+          allRefs.push(...saved)
+        } catch (error) {
+          console.error('[AgentView] 保存附件到 session 失败:', error)
+          toast.error('附件保存失败', {
+            description: '请确认当前工作区可用，或新建 Agent 会话后重新上传。',
+          })
+          return
         }
       }
 
+      if (allRefs.length === 0) {
+        toast.error('附件没有成功加入消息', {
+          description: '请重新上传文件，或切换到有效工作区后再试。',
+        })
+        return
+      }
+
+      const refs = allRefs.map((f) => `- ${f.filename}: ${f.targetPath}`).join('\n')
+      fileReferences += `<attached_files>\n${refs}\n</attached_files>\n\n`
+
       // 清理
-      for (const f of pendingFiles) {
+      for (const f of pendingFilesSnapshot) {
         if (f.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(f.previewUrl)
         window.__pendingAgentFileData?.delete(f.id)
       }
       setPendingFiles([])
+    }
+
+    // 构建引用选中文本：内联 XML 拼入 prompt，对话框不展示（parseAttachedFiles 剥离）
+    const quotedSelection = store.get(quotedSelectionMapAtom).get(sessionId)
+    if (quotedSelection) {
+      const capturedAt = quotedSelection.capturedAt
+      // XML 转义：path 走完整实体编码（&, <, >, "），text 仅需防误闭合外层标签
+      const safePath = quotedSelection.filePath
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+      const safeText = quotedSelection.text.replace(/<\/quoted_file>/gi, '</quoted_file_>')
+      const quotedBlock = `<quoted_file path="${safePath}">\n${safeText}\n</quoted_file>\n\n`
+      fileReferences = fileReferences + quotedBlock
+
+      store.set(quotedSelectionMapAtom, (prev) => {
+        const m = new Map(prev)
+        const current = m.get(sessionId)
+        if (current && current.capturedAt === capturedAt) m.delete(sessionId)
+        return m
+      })
     }
 
     // 2. 构建最终消息
@@ -973,7 +1460,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         running: true,
         content: '',
         toolActivities: [],
-        teammates: [],
         model: agentModelId || undefined,
         startedAt: streamStartedAt,
         inputTokens: existing?.inputTokens,
@@ -991,7 +1477,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       parent_tool_use_id: null,
       _createdAt: Date.now(),
     } as unknown as SDKMessage
-    setPersistedSDKMessages((prev) => [...prev, tempUserSDKMsg])
+    appendOptimisticPersistedMessage(tempUserSDKMsg)
 
     const input: AgentSendInput = {
       sessionId,
@@ -1001,14 +1487,16 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       workspaceId: currentWorkspaceId || undefined,
       startedAt: streamStartedAt,
       permissionModeOverride: permissionMode,
-      ...(attachedDirs.length > 0 && { additionalDirectories: attachedDirs }),
-      // 解析用户消息中的 Skill/MCP 引用，传递结构化元数据给后端
+      ...(additionalDirectoriesForRun.size > 0 && { additionalDirectories: Array.from(additionalDirectoriesForRun) }),
+      // 解析用户消息中的 Skill/MCP/会话引用，传递结构化元数据给后端
       ...(() => {
         const skills = [...effectiveText.matchAll(/\/skill:(\S+)/g)].map(m => m[1]).filter(Boolean) as string[]
         const mcps = [...effectiveText.matchAll(/#mcp:(\S+)/g)].map(m => m[1]).filter(Boolean) as string[]
+        const sessionIds = [...effectiveText.matchAll(/&session:(\S+)/g)].map(m => m[1]).filter(Boolean) as string[]
         return {
           ...(skills.length > 0 && { mentionedSkills: skills }),
           ...(mcps.length > 0 && { mentionedMcpServers: mcps }),
+          ...(sessionIds.length > 0 && { mentionedSessionIds: sessionIds }),
         }
       })(),
     }
@@ -1026,7 +1514,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         return map
       })
     })
-  }, [inputContent, pendingFiles, attachedDirs, sessionId, agentChannelId, agentModelId, currentWorkspaceId, workspaces, streaming, suggestion, hasAvailableModel, store, setStreamingStates, setPendingFiles, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, permissionMode])
+  }, [inputContent, attachedDirs, attachedFileDirectories, sessionId, agentChannelId, agentModelId, currentWorkspaceId, workspaces, streaming, suggestion, hasAvailableModel, store, setStreamingStates, setPendingFiles, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, permissionMode, messagesLoaded])
 
   /** 停止生成 */
   const handleStop = React.useCallback((): void => {
@@ -1037,7 +1525,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       map.set(sessionId, {
         ...current,
         running: false,
-        ...finalizeStreamingActivities(current.toolActivities, current.teammates),
+        ...finalizeStreamingActivities(current.toolActivities),
       })
       return map
     })
@@ -1077,7 +1565,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         running: true,
         content: '',
         toolActivities: [],
-        teammates: [],
         model: agentModelId || undefined,
         startedAt: streamStartedAt,
       }
@@ -1155,7 +1642,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         running: true,
         content: '',
         toolActivities: [],
-        teammates: [],
         model: agentModelId || undefined,
         startedAt: streamStartedAt,
         inputTokens: existing?.inputTokens,
@@ -1175,7 +1661,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     }).catch(console.error)
   }, [persistedSDKMessages, sessionId, agentChannelId, agentModelId, currentWorkspaceId, streaming, setAgentStreamErrors, setStreamingStates, permissionMode])
 
-  /** 在新会话中重试：创建新会话 + 切换 tab + 发送引用旧会话的提示词 */
+  /** 在新对话继续：创建新会话 + 切换 tab + 使用 &session 引用旧会话 */
   const handleRetryInNewSession = React.useCallback(async (): Promise<void> => {
     if (!agentChannelId) return
 
@@ -1188,8 +1674,9 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       // 切换到新会话 tab
       openSession('agent', meta.id, meta.title)
 
-      // 发送引用旧会话的默认提示词
-      const prompt = `上个会话的 id 是 ${sessionId}，可以参考同工作区下的会话继续完成工作`
+      // 发送引用旧会话的默认提示词，并通过 mentionedSessionIds 触发结构化会话引用注入
+      const prompt = `请读取 &session:${sessionId} 的历史，然后从上个会话停止的位置继续。`
+      const streamStartedAt = Date.now()
 
       // 初始化新会话流式状态
       setStreamingStates((prev) => {
@@ -1198,9 +1685,8 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           running: true,
           content: '',
           toolActivities: [],
-          teammates: [],
           model: agentModelId || undefined,
-          startedAt: Date.now(),
+          startedAt: streamStartedAt,
         })
         return map
       })
@@ -1211,6 +1697,8 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         channelId: agentChannelId,
         modelId: agentModelId || undefined,
         workspaceId: currentWorkspaceId || undefined,
+        mentionedSessionIds: [sessionId],
+        startedAt: streamStartedAt,
         permissionModeOverride: permissionMode,
       }).catch(console.error)
     } catch (error) {
@@ -1235,8 +1723,14 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       })
     } catch (error) {
       console.error('[AgentView] 分叉会话失败:', error)
+      const rawMsg = error instanceof Error ? error.message : '未知错误'
+      // SDK 偶尔会因为 sidechain/消息归属问题抛 "not found in session"，
+      // 这里给出更可操作的中文提示，而不是把 SDK 内部英文报错直接透传给用户
+      const friendlyDesc = /not found in session/i.test(rawMsg)
+        ? '该消息无法作为分叉起点（可能属于子代理执行过程或已被清理）。请选择主对话中的其他消息再试。'
+        : rawMsg
       toast.error('分叉会话失败', {
-        description: error instanceof Error ? error.message : '未知错误',
+        description: friendlyDesc,
       })
     }
   }, [sessionId, openSession, setAgentSessions])
@@ -1264,6 +1758,11 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         const map = new Map(prev)
         map.set(sessionId, (prev.get(sessionId) ?? 0) + 1)
         return map
+      })
+
+      // 刷新预览面板的 diff（文件已被回退，当前显示的内容已过期）
+      store.set(agentDiffRefreshVersionAtom, (prev) => {
+        const m = new Map(prev); m.set(sessionId, (prev.get(sessionId) ?? 0) + 1); return m
       })
 
       if (result.fileRewind?.canRewind) {
@@ -1311,13 +1810,184 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     (allAskUserRequests.get(sessionId)?.length ?? 0) > 0 ||
     (allExitPlanRequests.get(sessionId)?.length ?? 0) > 0
 
+  // ===== 预览面板状态（toggle 快捷键 + auto-preview 设置，分屏布局在 MainArea） =====
+  const setPreviewOpenMap = useSetAtom(previewPanelOpenMapAtom)
+  const [autoPreviewEnabled, setAutoPreviewEnabled] = useAtom(autoPreviewEnabledAtom)
+  const [processGroupsKeepExpanded, setProcessGroupsKeepExpanded] = useAtom(agentProcessGroupsKeepExpandedAtom)
+
+  const togglePreviewPanel = React.useCallback(() => {
+    setPreviewOpenMap((prev) => {
+      const m = new Map(prev)
+      const current = m.get(sessionId) ?? false
+      m.set(sessionId, !current)
+      return m
+    })
+  }, [sessionId, setPreviewOpenMap])
+
+  React.useEffect(() => {
+    return registerShortcut('toggle-preview-panel', togglePreviewPanel)
+  }, [togglePreviewPanel])
+
   const hasTextInput = inputContent.trim().length > 0
-  const canSend = (hasTextInput || pendingFiles.length > 0 || !!suggestion) && agentChannelId !== null && hasAvailableModel && (!streaming || hasTextInput)
+  const canSend = messagesLoaded && (hasTextInput || pendingFiles.length > 0 || !!suggestion) && agentChannelId !== null && hasAvailableModel && (!streaming || hasTextInput)
+
+  const inputToolbarItems = React.useMemo<ToolbarItem[]>(() => [
+    {
+      key: 'model',
+      node: (
+        <ModelSelector
+          filterChannelIds={agentChannelIds}
+          externalSelectedModel={externalSelectedModel}
+          onModelSelect={handleModelSelect}
+        />
+      ),
+    },
+    { key: 'permission-mode', node: <PermissionModeSelector sessionId={sessionId} /> },
+    {
+      key: 'thinking',
+      node: (
+        <AgentThinkingPopover
+          agentThinking={agentThinking}
+          onToggle={() => {
+            const next = agentThinking?.type === 'adaptive'
+              ? { type: 'disabled' as const }
+              : { type: 'adaptive' as const }
+            setAgentThinking(next)
+            window.electronAPI.updateSettings({ agentThinking: next })
+          }}
+        />
+      ),
+    },
+    { key: 'speech', node: <SpeechButton className="size-[36px] shrink-0 rounded-full" /> },
+    {
+      key: 'attach-file',
+      node: (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-[36px] shrink-0 rounded-full text-foreground/60 hover:text-foreground"
+              onClick={handleOpenFileDialog}
+            >
+              <Paperclip className="size-5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="top">
+            <p>添加附件</p>
+          </TooltipContent>
+        </Tooltip>
+      ),
+    },
+    {
+      key: 'attach-folder',
+      node: (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-[36px] shrink-0 rounded-full text-foreground/60 hover:text-foreground"
+              onClick={handleAttachFolder}
+            >
+              <FolderPlus className="size-5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="top">
+            <p>附加文件夹</p>
+          </TooltipContent>
+        </Tooltip>
+      ),
+    },
+    {
+      key: 'context-usage',
+      node: (
+        <ContextUsageBadge
+          inputTokens={contextStatus.inputTokens}
+          outputTokens={contextStatus.outputTokens}
+          cacheReadTokens={contextStatus.cacheReadTokens}
+          cacheCreationTokens={contextStatus.cacheCreationTokens}
+          contextWindow={contextStatus.contextWindow}
+          isCompacting={contextStatus.isCompacting}
+          isProcessing={streaming}
+          onCompact={handleCompact}
+        />
+      ),
+    },
+    {
+      key: 'auto-preview',
+      node: (
+        <DisplayOptionsPopover
+          autoPreviewEnabled={autoPreviewEnabled}
+          processGroupsKeepExpanded={processGroupsKeepExpanded}
+          onAutoPreviewChange={setAutoPreviewEnabled}
+          onProcessGroupsKeepExpandedChange={setProcessGroupsKeepExpanded}
+        />
+      ),
+    },
+  ], [
+    agentChannelIds,
+    externalSelectedModel,
+    handleModelSelect,
+    sessionId,
+    agentThinking,
+    setAgentThinking,
+    handleOpenFileDialog,
+    handleAttachFolder,
+    contextStatus.inputTokens,
+    contextStatus.outputTokens,
+    contextStatus.cacheReadTokens,
+    contextStatus.cacheCreationTokens,
+    contextStatus.contextWindow,
+    contextStatus.isCompacting,
+    streaming,
+    handleCompact,
+    autoPreviewEnabled,
+    processGroupsKeepExpanded,
+    setAutoPreviewEnabled,
+    setProcessGroupsKeepExpanded,
+  ])
+
+  const inputTrailingNode = streaming && !hasTextInput ? (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="size-[36px] rounded-full text-destructive hover:!text-[hsl(0,75%,55%)] hover:!bg-[var(--stop-hover-bg)]"
+          onClick={handleStop}
+        >
+          <Square className="size-[16px]" fill="currentColor" strokeWidth={0} />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="top">
+        <p>停止 Agent ({getAcceleratorDisplay(getActiveAccelerator('stop-generation'))})</p>
+      </TooltipContent>
+    </Tooltip>
+  ) : (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      className={cn(
+        'size-[36px] rounded-full',
+        canSend
+          ? 'text-primary hover:bg-primary/10'
+          : 'text-foreground/30 cursor-not-allowed'
+      )}
+      onClick={handleSend}
+      disabled={!canSend}
+    >
+      <CornerDownLeft className="size-[22px]" />
+    </Button>
+  )
 
   return (
     <>
     <AgentSessionProvider sessionId={sessionId}>
-      {/* 主内容区域 */}
       <div className="flex flex-col h-full flex-1 min-w-0 max-w-[min(72rem,100%)] mx-auto">
         {/* Agent Header */}
         <AgentHeader sessionId={sessionId} />
@@ -1332,7 +2002,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           streamState={streamState}
           liveMessages={liveMessages}
           sessionPath={sessionPath}
-          attachedDirs={attachedDirs}
+          attachedDirs={allAttachedDirs}
           stoppedByUser={stoppedByUser}
           onRetry={handleRetry}
           onRetryInNewSession={handleRetryInNewSession}
@@ -1346,15 +2016,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
 
         {/* AskUserQuestion 交互式问答横幅 */}
         <AskUserBanner sessionId={sessionId} />
-
-        {/* Plan 模式指示条 */}
-        {isPlanMode && (
-          <div className="mx-4 mb-2 flex items-center gap-2 px-3 py-2 rounded-lg bg-primary/5 text-primary text-sm animate-in fade-in slide-in-from-bottom-1 duration-200">
-            <MapIcon className="size-4 animate-pulse" />
-            <span className="font-medium">Agent 正在规划中...</span>
-            <span className="text-xs text-muted-foreground">完成后将请求你的审批</span>
-          </div>
-        )}
 
         {/* ExitPlanMode 计划审批横幅 */}
         <ExitPlanModeBanner sessionId={sessionId} />
@@ -1388,8 +2049,8 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
               </div>
             )}
 
-            {/* 附件预览区域 */}
-            {pendingFiles.length > 0 && (
+            {/* 附件 + 引用选中文本 Chip（同排并排） */}
+            {(pendingFiles.length > 0 || currentQuotedSelection) && (
               <div className="flex flex-wrap gap-2 px-3 pt-2.5 pb-1.5">
                 {pendingFiles.map((file) => (
                   <AttachmentPreviewItem
@@ -1398,8 +2059,16 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
                     mediaType={file.mediaType}
                     previewUrl={file.previewUrl}
                     onRemove={() => handleRemoveFile(file.id)}
+                    onClick={file.filename.startsWith('clipboard-') ? () => handleClipboardPreview(file) : undefined}
                   />
                 ))}
+                {currentQuotedSelection && (
+                  <QuotedSelectionChip
+                    text={currentQuotedSelection.text}
+                    filePath={currentQuotedSelection.filePath}
+                    onRemove={handleRemoveQuotedSelection}
+                  />
+                )}
               </div>
             )}
 
@@ -1434,11 +2103,13 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
               onChange={setInputContent}
               onSubmit={handleSend}
               onPasteFiles={handlePasteFiles}
+              onPasteLongText={handlePasteLongText}
+              longTextPasteThreshold={LONG_TEXT_ATTACHMENT_THRESHOLD}
               placeholder={
                 agentChannelId && hasAvailableModel
                   ? sendWithCmdEnter
-                    ? '输入消息... (⌘/Ctrl+Enter 发送，Enter 换行，@ 引用文件，/ 调用 Skill，# 调用 MCP)'
-                    : '输入消息... (Enter 发送，Shift+Enter 换行，@ 引用文件，/ 调用 Skill，# 调用 MCP)'
+                    ? '输入消息... (⌘/Ctrl+Enter 发送，Enter 换行，@ 引用文件，/ 调用 Skill，# 调用 MCP，& 引用会话)'
+                    : '输入消息... (Enter 发送，Shift+Enter 换行，@ 引用文件，/ 调用 Skill，# 调用 MCP，& 引用会话)'
                   : !agentChannelId
                     ? '请先在设置中选择 Agent 供应商'
                     : '暂无可用模型，请先在设置中启用渠道'
@@ -1446,118 +2117,20 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
               disabled={!agentChannelId || !hasAvailableModel}
               autoFocusTrigger={sessionId}
               collapsible
+              enableMentions
               workspacePath={sessionPath}
+              workspaceId={currentWorkspaceId}
               workspaceSlug={workspaceSlug}
-              attachedDirs={workspaceDirs}
-              sessionAttachedDirs={attachedDirs}
+              sessionId={sessionId}
+              attachedDirs={workspaceMentionPaths}
+              sessionAttachedDirs={sessionMentionPaths}
               htmlValue={inputHtmlContent}
               onHtmlChange={setInputHtmlContent}
               sendWithCmdEnter={sendWithCmdEnter}
             />
 
-            {/* Footer 工具栏 */}
-            <div className="flex items-center justify-between px-2 py-1 h-[48px] gap-4">
-              <div className="flex items-center gap-1.5 flex-1 min-w-0">
-                <ModelSelector
-                  filterChannelIds={agentChannelIds}
-                  externalSelectedModel={externalSelectedModel}
-                  onModelSelect={handleModelSelect}
-                />
-                <PermissionModeSelector sessionId={sessionId} />
-                {/* 思考模式切换 + 展开偏好 */}
-                <AgentThinkingPopover
-                  agentThinking={agentThinking}
-                  onToggle={() => {
-                    const next = agentThinking?.type === 'adaptive'
-                      ? { type: 'disabled' as const }
-                      : { type: 'adaptive' as const }
-                    setAgentThinking(next)
-                    window.electronAPI.updateSettings({ agentThinking: next })
-                  }}
-                />
-                <SpeechButton className="size-[36px] rounded-full" />
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="size-[36px] rounded-full text-foreground/60 hover:text-foreground"
-                      onClick={handleOpenFileDialog}
-                    >
-                      <Paperclip className="size-5" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">
-                    <p>添加附件</p>
-                  </TooltipContent>
-                </Tooltip>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="size-[36px] rounded-full text-foreground/60 hover:text-foreground"
-                      onClick={handleAttachFolder}
-                    >
-                      <FolderPlus className="size-5" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">
-                    <p>附加文件夹</p>
-                  </TooltipContent>
-                </Tooltip>
-                <ContextUsageBadge
-                  inputTokens={contextStatus.inputTokens}
-                  outputTokens={contextStatus.outputTokens}
-                  cacheReadTokens={contextStatus.cacheReadTokens}
-                  cacheCreationTokens={contextStatus.cacheCreationTokens}
-                  contextWindow={contextStatus.contextWindow}
-                  isCompacting={contextStatus.isCompacting}
-                  isProcessing={streaming}
-                  onCompact={handleCompact}
-                />
-                {/* <FeishuNotifyToggle sessionId={sessionId} /> */}
-              </div>
-
-              <div className="flex items-center gap-1.5">
-                {streaming && !hasTextInput ? (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="size-[36px] rounded-full text-destructive hover:!text-[hsl(0,75%,55%)] hover:!bg-[var(--stop-hover-bg)]"
-                        onClick={handleStop}
-                      >
-                        <Square className="size-[16px]" fill="currentColor" strokeWidth={0} />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="top">
-                      <p>停止 Agent ({getAcceleratorDisplay(getActiveAccelerator('stop-generation'))})</p>
-                    </TooltipContent>
-                  </Tooltip>
-                ) : (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className={cn(
-                      'size-[36px] rounded-full',
-                      canSend
-                        ? 'text-primary hover:bg-primary/10'
-                        : 'text-foreground/30 cursor-not-allowed'
-                    )}
-                    onClick={handleSend}
-                    disabled={!canSend}
-                  >
-                    <CornerDownLeft className="size-[22px]" />
-                  </Button>
-                )}
-              </div>
-            </div>
+            {/* Footer 工具栏 — 容器变窄时尾部按钮自动折叠进「更多」Popover */}
+            <InputToolbarOverflow items={inputToolbarItems} trailing={inputTrailingNode} />
           </div>
         </div>
         )}

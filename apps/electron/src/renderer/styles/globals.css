@@ -36,6 +36,8 @@
     /* 虚线边框色（新会话按钮、搜索按钮） */
     --dashed-border: 0 0% 9% / 0.35;
     --dashed-border-hover: 0 0% 9% / 0.50;
+    /* Markdown 预览正文字号（medium 档默认；initializer 加载用户偏好后会覆盖） */
+    --md-preview-font-size: 15px;
   }
 
   .dark {
@@ -313,6 +315,68 @@
 .titlebar-drag-region {
   -webkit-app-region: drag;
   app-region: drag;
+}
+
+/* Left sidebar sits above the global titlebar layer, so it owns a stable top drag strip. */
+.sidebar-window-drag-strip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+/* Windows 自定义窗口控制按钮
+ *
+ * 可点击性关键点（解决 Windows 用户点击失效 / 需要双击的 bug）：
+ * 1. 容器本身就是 no-drag 矩形，不靠"在 drag 区里挖三个小洞"——避免 Chromium hitmask
+ *    在小矩形 + 高 DPI 缩放下的像素对齐误差。
+ * 2. AppShell 的 drag-region 在 Windows 上不再延伸到按钮区域（见 AppShell.tsx 的 right-[126px]），
+ *    drag 与 no-drag 区域彻底解耦，OS hitmask 不会再误判。
+ * 3. 按钮尺寸与位置使用整数 px，避免 125%/150%/175% DPI 下四舍五入收缩。
+ */
+.window-controls {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  height: 28px;
+  gap: 1px;
+}
+
+.window-control-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 28px;
+  border-radius: 4px;
+  color: hsl(var(--muted-foreground));
+  background: transparent;
+  border: none;
+  cursor: default;
+  transition: background-color 0.15s ease, color 0.15s ease;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.window-control-btn:hover {
+  background-color: hsl(var(--muted) / 0.35);
+  color: hsl(var(--foreground));
+}
+
+.window-control-btn:active {
+  background-color: hsl(var(--muted) / 0.5);
+}
+
+.window-control-close:hover {
+  background-color: #c42b1c;
+  color: #fff;
+}
+
+.window-control-close:active {
+  background-color: #a01d11;
+  color: #fff;
 }
 
 /* 深色特殊主题 dialog 光晕效果 */
@@ -614,6 +678,7 @@
 .scrollbar-thin::-webkit-scrollbar,
 .scrollbar-thin > *::-webkit-scrollbar {
   width: 6px;
+  height: 6px;
 }
 .scrollbar-thin::-webkit-scrollbar-track,
 .scrollbar-thin > *::-webkit-scrollbar-track {
@@ -627,6 +692,10 @@
 .scrollbar-thin::-webkit-scrollbar-thumb:hover,
 .scrollbar-thin > *::-webkit-scrollbar-thumb:hover {
   background-color: hsl(var(--muted-foreground) / 0.5);
+}
+.scrollbar-thin::-webkit-scrollbar-corner,
+.scrollbar-thin > *::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 /* 滚动区域上下渐隐遮罩 */
@@ -654,8 +723,37 @@
 }
 
 .code-block-wrapper pre.shiki {
-  font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
+  /* 与 Tailwind font-mono / @pierre/diffs 默认保持一致，跨平台命中系统等宽字体 */
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Consolas, 'Courier New', monospace;
   background-color: hsl(var(--code-bg)) !important;
+}
+
+.code-block-wrapper pre.shiki,
+.mermaid-block-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
+}
+
+:is(.code-block-wrapper pre.shiki, .mermaid-block-scroll)::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+:is(.code-block-wrapper pre.shiki, .mermaid-block-scroll)::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+:is(.code-block-wrapper pre.shiki, .mermaid-block-scroll)::-webkit-scrollbar-thumb {
+  background-color: hsl(var(--muted-foreground) / 0.3);
+  border-radius: 999px;
+}
+
+:is(.code-block-wrapper pre.shiki, .mermaid-block-scroll)::-webkit-scrollbar-thumb:hover {
+  background-color: hsl(var(--muted-foreground) / 0.5);
+}
+
+:is(.code-block-wrapper pre.shiki, .mermaid-block-scroll)::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 .code-block-wrapper pre.shiki code {
@@ -823,7 +921,16 @@
   content: none;
 }
 
-/* ===== FileBrowser 自动定位的高亮脉冲 ===== */
+/* ===== FileBrowser 自动定位的高亮脉冲 =====
+ * 末关键帧用 transparent 是故意的：Agent 自动 reveal（select=false）一行不进入选中态，
+ * 动画结束后行需要恢复无背景色。如果改成 hsl(--accent) 等不透明色，那一行会一直停留
+ * 在高亮色直到下次重渲染。
+ *
+ * 副作用：当 reveal 同时把目标置为选中态（用户搜索点击，select=true）时，
+ * animation 在 1.2s 内会盖掉 .bg-accent，造成"先闪→变透明→才出现选中色"的视觉断层。
+ * 因此 FileTreeItem 在 select=true 路径下跳过 .file-browser-row-flash class，
+ * 直接呈现选中态，避开此冲突。详见 FileBrowser.tsx 中 reveal 分支的注释。
+ */
 @keyframes file-browser-flash {
   0%   { background-color: hsl(var(--primary) / 0.18); }
   50%  { background-color: hsl(var(--primary) / 0.22); }
@@ -831,6 +938,140 @@
 }
 .file-browser-row-flash {
   animation: file-browser-flash 1.2s ease-out;
+}
+
+/* ===== FileBrowser sticky 目录行：每条 sticky 链路最末一行加一道软扩散阴影 =====
+   :has() 选择器只能向后看 sticky 行同一父级内的兄弟，所以 "栈最末" 实际语义是
+   "本节点子树内不再有更深的 sticky 子行"。
+   - 单棵展开链路：只有最深一层 sticky 子行有阴影（父行的子项容器内含子 sticky，被规则排除）。
+   - 多个平行展开（多个根目录同时打开）：每条链路各自一道阴影——这里把每棵独立树视为独立视觉单元。
+   要做到全局唯一一道阴影需要 JS 监听滚动 + 展开状态动态打标记，目前不做。 */
+[data-sticky-row="true"]:not(:has(~ * [data-sticky-row="true"])) {
+  box-shadow: 0 2px 4px -1px hsl(var(--foreground) / 0.08);
+}
+
+/* ===== Office 内联预览 ===== */
+.office-preview-host {
+  min-height: 100%;
+  padding: 12px;
+  color: hsl(var(--foreground));
+  font-size: 12px;
+}
+
+.office-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.office-preview-title {
+  color: hsl(var(--foreground) / 0.72);
+  font-weight: 600;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.office-preview-notice,
+.office-empty {
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.office-preview-notice {
+  border: 1px solid hsl(var(--border) / 0.45);
+  border-radius: 8px;
+  background: hsl(var(--muted) / 0.24);
+  padding: 8px 10px;
+}
+
+.office-sheet,
+.office-slide {
+  border: 1px solid hsl(var(--border) / 0.5);
+  border-radius: 8px;
+  background: hsl(var(--background) / 0.72);
+  overflow: hidden;
+}
+
+.office-sheet h3,
+.office-slide h3 {
+  margin: 0;
+  color: hsl(var(--foreground));
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.office-sheet h3 {
+  padding: 10px 12px;
+  border-bottom: 1px solid hsl(var(--border) / 0.45);
+}
+
+.office-table-wrap {
+  overflow: auto;
+  max-width: 100%;
+}
+
+.office-table-wrap table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.office-table-wrap th,
+.office-table-wrap td {
+  max-width: 280px;
+  min-width: 72px;
+  border-right: 1px solid hsl(var(--border) / 0.35);
+  border-bottom: 1px solid hsl(var(--border) / 0.35);
+  padding: 6px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.office-table-wrap thead th,
+.office-row-heading {
+  position: sticky;
+  z-index: 1;
+  background: hsl(var(--muted) / 0.36);
+  color: hsl(var(--muted-foreground));
+  font-weight: 500;
+}
+
+.office-table-wrap thead th {
+  top: 0;
+}
+
+.office-row-heading {
+  left: 0;
+  min-width: 44px;
+  text-align: right;
+}
+
+.office-slide {
+  padding: 12px;
+}
+
+.office-slide-index {
+  margin-bottom: 6px;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.office-slide ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: hsl(var(--foreground) / 0.82);
+  line-height: 1.6;
+}
+
+.office-slide li + li {
+  margin-top: 4px;
 }
 
 /* ===== 语音输入浮窗拖动区域 ===== */
@@ -841,4 +1082,340 @@
 
 .voice-dictation-no-drag {
   -webkit-app-region: no-drag;
+}
+
+/* ===== Tiptap 可编辑表格样式 ===== */
+.ProseMirror table,
+.ProseMirror table.markdown-table {
+  border: 1px solid hsl(var(--foreground) / 0.22);
+  border-collapse: separate;
+  border-radius: 6px;
+  border-spacing: 0;
+  width: 100%;
+  margin: 0.75em 0;
+  overflow: hidden;
+  table-layout: auto;
+}
+
+.ProseMirror table colgroup {
+  display: table-column-group;
+}
+
+.ProseMirror table col {
+  display: table-column;
+}
+
+.ProseMirror table tr {
+  display: table-row;
+}
+
+.ProseMirror table td,
+.ProseMirror table th,
+.ProseMirror table.markdown-table td,
+.ProseMirror table.markdown-table th,
+.ProseMirror .md-td,
+.ProseMirror .md-th {
+  background-clip: padding-box;
+  border: 0 !important;
+  border-right: 1px solid hsl(var(--foreground) / 0.28) !important;
+  border-bottom: 1px solid hsl(var(--foreground) / 0.16) !important;
+  box-shadow: inset -1px 0 0 hsl(var(--background) / 0.9);
+  min-width: 48px;
+  padding: 4px 8px;
+  position: relative;
+  vertical-align: top;
+}
+
+.ProseMirror table.markdown-table td,
+.ProseMirror table.markdown-table th {
+  border-right-color: hsl(var(--foreground) / 0.28) !important;
+}
+
+.ProseMirror table td:not(:last-child)::after,
+.ProseMirror table th:not(:last-child)::after,
+.ProseMirror table.markdown-table td:not(:last-child)::after,
+.ProseMirror table.markdown-table th:not(:last-child)::after {
+  background: hsl(var(--foreground) / 0.28);
+  bottom: 0;
+  content: '';
+  pointer-events: none;
+  position: absolute;
+  right: -1px;
+  top: 0;
+  width: 1px;
+}
+
+.ProseMirror table tr > :last-child,
+.ProseMirror table.markdown-table tr > :last-child {
+  border-right: 0 !important;
+  box-shadow: none;
+}
+
+.ProseMirror table tr:last-child > *,
+.ProseMirror table.markdown-table tr:last-child > * {
+  border-bottom: 0 !important;
+}
+
+.ProseMirror table th,
+.ProseMirror table.markdown-table th {
+  background-color: hsl(var(--muted) / 0.5);
+  font-weight: 600;
+  text-align: left;
+}
+
+.ProseMirror table tr:nth-child(even) td,
+.ProseMirror table.markdown-table tr:nth-child(even) td {
+  background-color: hsl(var(--muted) / 0.15);
+}
+
+.ProseMirror .selectedCell::after {
+  z-index: 2;
+  position: absolute;
+  content: '';
+  inset: 0;
+  background: hsl(var(--primary) / 0.12);
+  pointer-events: none;
+}
+
+.ProseMirror:not([contenteditable='true']) .selectedCell::after {
+  display: none;
+}
+
+/* ===== Tiptap 可编辑代码块 ===== */
+.ProseMirror pre.markdown-code-block {
+  background: hsl(var(--muted) / 0.45) !important;
+  color: hsl(var(--foreground)) !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace !important;
+  font-size: 13px;
+  line-height: 1.6;
+  tab-size: 2;
+  white-space: pre;
+}
+
+.dark .ProseMirror pre.markdown-code-block,
+.theme-ocean-dark .ProseMirror pre.markdown-code-block,
+.theme-slate-dark .ProseMirror pre.markdown-code-block {
+  background: hsl(var(--muted)) !important;
+  color: hsl(var(--foreground)) !important;
+}
+
+.theme-forest-dark .ProseMirror pre.markdown-code-block {
+  background: hsl(150 20% 9%) !important;
+  color: hsl(var(--foreground)) !important;
+}
+
+.ProseMirror pre.markdown-code-block code,
+.ProseMirror pre.markdown-code-block code * {
+  background: transparent !important;
+  font: inherit;
+  padding: 0 !important;
+  -webkit-text-fill-color: currentColor;
+}
+
+.ProseMirror pre.markdown-code-block .hljs-comment,
+.ProseMirror pre.markdown-code-block .hljs-quote {
+  color: hsl(var(--muted-foreground));
+  font-style: italic;
+}
+
+.ProseMirror pre.markdown-code-block .hljs-keyword,
+.ProseMirror pre.markdown-code-block .hljs-selector-tag,
+.ProseMirror pre.markdown-code-block .hljs-subst,
+.ProseMirror pre.markdown-code-block .hljs-doctag,
+.ProseMirror pre.markdown-code-block .hljs-template-tag,
+.ProseMirror pre.markdown-code-block .hljs-template-variable {
+  color: hsl(var(--primary));
+  font-weight: 600;
+}
+
+.ProseMirror pre.markdown-code-block .hljs-string,
+.ProseMirror pre.markdown-code-block .hljs-regexp,
+.ProseMirror pre.markdown-code-block .hljs-title,
+.ProseMirror pre.markdown-code-block .hljs-section,
+.ProseMirror pre.markdown-code-block .hljs-name,
+.ProseMirror pre.markdown-code-block .hljs-selector-id,
+.ProseMirror pre.markdown-code-block .hljs-selector-class {
+  color: hsl(150 55% 34%);
+}
+
+.dark .ProseMirror pre.markdown-code-block .hljs-string,
+.dark .ProseMirror pre.markdown-code-block .hljs-regexp,
+.dark .ProseMirror pre.markdown-code-block .hljs-title,
+.dark .ProseMirror pre.markdown-code-block .hljs-section,
+.dark .ProseMirror pre.markdown-code-block .hljs-name,
+.dark .ProseMirror pre.markdown-code-block .hljs-selector-id,
+.dark .ProseMirror pre.markdown-code-block .hljs-selector-class {
+  color: hsl(150 55% 62%);
+}
+
+.ProseMirror pre.markdown-code-block .hljs-number,
+.ProseMirror pre.markdown-code-block .hljs-literal,
+.ProseMirror pre.markdown-code-block .hljs-variable,
+.ProseMirror pre.markdown-code-block .hljs-template-variable,
+.ProseMirror pre.markdown-code-block .hljs-attribute,
+.ProseMirror pre.markdown-code-block .hljs-symbol,
+.ProseMirror pre.markdown-code-block .hljs-bullet {
+  color: hsl(24 80% 44%);
+}
+
+.dark .ProseMirror pre.markdown-code-block .hljs-number,
+.dark .ProseMirror pre.markdown-code-block .hljs-literal,
+.dark .ProseMirror pre.markdown-code-block .hljs-variable,
+.dark .ProseMirror pre.markdown-code-block .hljs-template-variable,
+.dark .ProseMirror pre.markdown-code-block .hljs-attribute,
+.dark .ProseMirror pre.markdown-code-block .hljs-symbol,
+.dark .ProseMirror pre.markdown-code-block .hljs-bullet {
+  color: hsl(32 90% 64%);
+}
+
+.ProseMirror pre.markdown-code-block .hljs-built_in,
+.ProseMirror pre.markdown-code-block .hljs-type,
+.ProseMirror pre.markdown-code-block .hljs-class .hljs-title,
+.ProseMirror pre.markdown-code-block .hljs-function .hljs-title,
+.ProseMirror pre.markdown-code-block .hljs-title.function_ {
+  color: hsl(210 70% 45%);
+}
+
+.dark .ProseMirror pre.markdown-code-block .hljs-built_in,
+.dark .ProseMirror pre.markdown-code-block .hljs-type,
+.dark .ProseMirror pre.markdown-code-block .hljs-class .hljs-title,
+.dark .ProseMirror pre.markdown-code-block .hljs-function .hljs-title,
+.dark .ProseMirror pre.markdown-code-block .hljs-title.function_ {
+  color: hsl(210 90% 70%);
+}
+
+.ProseMirror pre.markdown-code-block .hljs-attr,
+.ProseMirror pre.markdown-code-block .hljs-property,
+.ProseMirror pre.markdown-code-block .hljs-params,
+.ProseMirror pre.markdown-code-block .hljs-selector-attr,
+.ProseMirror pre.markdown-code-block .hljs-selector-pseudo {
+  color: hsl(270 55% 48%);
+}
+
+.dark .ProseMirror pre.markdown-code-block .hljs-attr,
+.dark .ProseMirror pre.markdown-code-block .hljs-property,
+.dark .ProseMirror pre.markdown-code-block .hljs-params,
+.dark .ProseMirror pre.markdown-code-block .hljs-selector-attr,
+.dark .ProseMirror pre.markdown-code-block .hljs-selector-pseudo {
+  color: hsl(275 72% 74%);
+}
+
+.ProseMirror pre.markdown-code-block .hljs-operator,
+.ProseMirror pre.markdown-code-block .hljs-punctuation,
+.ProseMirror pre.markdown-code-block .hljs-meta,
+.ProseMirror pre.markdown-code-block .hljs-link {
+  color: hsl(190 72% 34%);
+}
+
+.dark .ProseMirror pre.markdown-code-block .hljs-operator,
+.dark .ProseMirror pre.markdown-code-block .hljs-punctuation,
+.dark .ProseMirror pre.markdown-code-block .hljs-meta,
+.dark .ProseMirror pre.markdown-code-block .hljs-link {
+  color: hsl(190 78% 65%);
+}
+
+.ProseMirror pre.markdown-code-block .hljs-tag,
+.ProseMirror pre.markdown-code-block .hljs-tag .hljs-name {
+  color: hsl(345 72% 44%);
+}
+
+.dark .ProseMirror pre.markdown-code-block .hljs-tag,
+.dark .ProseMirror pre.markdown-code-block .hljs-tag .hljs-name {
+  color: hsl(345 82% 70%);
+}
+
+.ProseMirror pre.markdown-code-block .hljs-addition {
+  color: hsl(145 58% 32%);
+}
+
+.dark .ProseMirror pre.markdown-code-block .hljs-addition {
+  color: hsl(145 62% 64%);
+}
+
+.ProseMirror pre.markdown-code-block .hljs-deletion {
+  color: hsl(0 68% 48%);
+}
+
+.dark .ProseMirror pre.markdown-code-block .hljs-deletion {
+  color: hsl(0 78% 72%);
+}
+
+.ProseMirror .markdown-code-edit-layer {
+  background: transparent !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace !important;
+  font-size: 13px !important;
+  font-variant-ligatures: none;
+  font-kerning: none;
+  letter-spacing: 0 !important;
+  line-height: 1.6 !important;
+  tab-size: 2;
+  white-space: pre !important;
+}
+
+.ProseMirror .markdown-code-edit-layer code {
+  background: transparent !important;
+  color: hsl(var(--foreground)) !important;
+  font: inherit !important;
+  letter-spacing: 0 !important;
+  line-height: inherit !important;
+  padding: 0 !important;
+  tab-size: inherit;
+  white-space: pre !important;
+  -webkit-text-fill-color: currentColor;
+  caret-color: hsl(var(--foreground));
+}
+
+.ProseMirror .markdown-code-edit-layer ::selection {
+  background: hsl(var(--primary) / 0.22);
+}
+
+/* ===== Session Mini Map ===== */
+.session-minimap-popover {
+  transform-origin: left center;
+  will-change: transform, opacity;
+}
+
+.session-minimap-popover-enter {
+  animation: session-minimap-popover-in 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.session-minimap-popover-exit {
+  animation: session-minimap-popover-out 90ms ease-in both;
+}
+
+.session-minimap-content-enter {
+  animation: session-minimap-content-in 140ms ease-out both;
+}
+
+@keyframes session-minimap-popover-in {
+  from {
+    opacity: 0;
+    transform: translate3d(-4px, 2px, 0) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes session-minimap-popover-out {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translate3d(-3px, 1px, 0) scale(0.99);
+  }
+}
+
+@keyframes session-minimap-content-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }

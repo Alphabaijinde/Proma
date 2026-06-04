@@ -6,11 +6,14 @@
  */
 
 import * as React from 'react'
-import { useAtomValue, useSetAtom } from 'jotai'
+import { useAtom, useAtomValue, useSetAtom } from 'jotai'
 import { Pencil, Check, X, PanelRight } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { agentSessionsAtom, agentSidePanelOpenMapAtom, workspaceFilesVersionAtom } from '@/atoms/agent-atoms'
+import { agentSessionsAtom, agentSidePanelOpenAtom, workspaceFilesVersionAtom } from '@/atoms/agent-atoms'
+import { tabsAtom, updateTabTitle } from '@/atoms/tab-atoms'
+import { replaceAgentSessionInFreshnessOrder } from '@/lib/agent-session-list'
+import { registerShortcut } from '@/lib/shortcut-registry'
 
 /** AgentHeader 属性接口 */
 interface AgentHeaderProps {
@@ -21,24 +24,23 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
   const sessions = useAtomValue(agentSessionsAtom)
   const session = sessions.find((s) => s.id === sessionId) ?? null
   const setAgentSessions = useSetAtom(agentSessionsAtom)
+  const setTabs = useSetAtom(tabsAtom)
   const [editing, setEditing] = React.useState(false)
   const [editTitle, setEditTitle] = React.useState('')
   const inputRef = React.useRef<HTMLInputElement>(null)
 
-  // 文件面板切换状态
-  const sidePanelOpenMap = useAtomValue(agentSidePanelOpenMapAtom)
-  const setSidePanelOpenMap = useSetAtom(agentSidePanelOpenMapAtom)
+  // 文件面板切换状态（全局共享）
+  const [isPanelOpen, setSidePanelOpen] = useAtom(agentSidePanelOpenAtom)
   const filesVersion = useAtomValue(workspaceFilesVersionAtom)
-  const isPanelOpen = sidePanelOpenMap.get(sessionId) ?? true
   const hasFileChanges = filesVersion > 0
 
   const togglePanel = React.useCallback(() => {
-    setSidePanelOpenMap((prev) => {
-      const map = new Map(prev)
-      map.set(sessionId, !(map.get(sessionId) ?? true))
-      return map
-    })
-  }, [sessionId, setSidePanelOpenMap])
+    setSidePanelOpen((v) => !v)
+  }, [setSidePanelOpen])
+
+  React.useEffect(() => {
+    return registerShortcut('toggle-right-panel', togglePanel)
+  }, [togglePanel])
 
   if (!session) return null
 
@@ -58,10 +60,11 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
     }
 
     try {
-      await window.electronAPI.updateAgentSessionTitle(session.id, trimmed)
-      // 刷新会话列表以同步侧边栏
-      const sessions = await window.electronAPI.listAgentSessions()
-      setAgentSessions(sessions)
+      const updated = await window.electronAPI.updateAgentSessionTitle(session.id, trimmed)
+      // 同步更新标签页标题
+      setTabs((prev) => updateTabTitle(prev, updated.id, updated.title))
+      // 同步更新侧边栏会话列表
+      setAgentSessions((prev) => replaceAgentSessionInFreshnessOrder(prev, updated))
     } catch (error) {
       console.error('[AgentHeader] 更新标题失败:', error)
     }
@@ -79,7 +82,10 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
   }
 
   return (
-    <div className="relative z-[51] flex items-center gap-2 px-4 h-[48px] titlebar-drag-region">
+    <div className="relative z-[51] flex items-center gap-2 px-4 h-[48px]">
+      {/* 拖拽层仅覆盖左侧区域，避开右上角 WindowControls（Windows 上 ~126px）。
+          否则 header 的 drag-region 会与按钮重叠，导致 OS hitmask 把单击当成标题栏点击。 */}
+      <div className="absolute inset-0 right-[126px] titlebar-drag-region pointer-events-none" />
       {editing ? (
         <div className="flex items-center gap-1.5 flex-1 min-w-0 titlebar-no-drag">
           <input
@@ -124,7 +130,7 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
               <Pencil className="size-3.5" />
             </button>
           </div>
-          {/* 文件面板打开按钮（仅面板关闭时显示） */}
+          {/* 文件面板打开按钮（面板关闭时显示） */}
           {!isPanelOpen && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -142,7 +148,7 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="bottom">
-                <p>打开文件面板</p>
+                <p>打开文件面板 ({navigator.platform.includes('Mac') ? '⌘⇧B' : 'Ctrl+Shift+B'})</p>
               </TooltipContent>
             </Tooltip>
           )}

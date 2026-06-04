@@ -19,9 +19,11 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/dompurify": "^3.2.0",
     "@types/node": "^20.0.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
+    "dompurify": "^3.4.2",
     "typescript": "^5.0.0"
   },
   "peerDependencies": {
@@ -29,5 +31,12 @@
   },
   "dependencies": {
     "jotai": "^2.17.1"
+  },
+  "overrides": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.153",
+    "@anthropic-ai/claude-agent-sdk-darwin-arm64": "0.3.153",
+    "@anthropic-ai/claude-agent-sdk-darwin-x64": "0.3.153",
+    "@anthropic-ai/claude-agent-sdk-win32-arm64": "0.3.153",
+    "@anthropic-ai/claude-agent-sdk-win32-x64": "0.3.153"
   }
 }

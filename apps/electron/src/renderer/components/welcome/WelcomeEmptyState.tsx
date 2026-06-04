@@ -9,7 +9,7 @@
 
 import * as React from 'react'
 import { useAtomValue, useAtom } from 'jotai'
-import { Lightbulb, MessageSquare, Bot } from 'lucide-react'
+import { Lightbulb, MessageSquare, Bot, StickyNote } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { userProfileAtom } from '@/atoms/user-profile'
 import { appModeAtom, type AppMode } from '@/atoms/app-mode'
@@ -28,6 +28,7 @@ function getGreeting(hour: number): string {
 const MODE_CONFIG: Record<AppMode, { icon: React.ReactNode; label: string }> = {
   chat: { icon: <MessageSquare size={15} />, label: 'Chat' },
   agent: { icon: <Bot size={15} />, label: 'Agent' },
+  scratch: { icon: <StickyNote size={15} />, label: 'Scratch Pad' },
 }
 
 export function WelcomeEmptyState(): React.ReactElement {
@@ -52,7 +53,7 @@ export function WelcomeEmptyState(): React.ReactElement {
   }, [mode, setMode])
 
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-6 px-4 animate-in fade-in duration-500">
+    <div className="flex h-full flex-col items-center justify-center gap-6 px-4">
       {/* 问候语 */}
       <h1 className="text-[26px] font-semibold tracking-tight text-foreground">
         {displayName}，{greeting}

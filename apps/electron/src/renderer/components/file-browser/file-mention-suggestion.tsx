@@ -9,6 +9,7 @@
 import type React from 'react'
 import { ReactRenderer } from '@tiptap/react'
 import type { SuggestionOptions, SuggestionProps } from '@tiptap/suggestion'
+import { toast } from 'sonner'
 import { FileMentionList } from './FileMentionList'
 import type { FileMentionRef } from './FileMentionList'
 import type { FileIndexEntry, FileSearchResult } from '@proma/shared'
@@ -22,17 +23,26 @@ export function createFileMentionSuggestion(
   sessionAttachedDirsRef?: React.RefObject<string[]>,
 ): Omit<SuggestionOptions<FileIndexEntry>, 'editor'> {
   let lastResult: FileSearchResult | null = null
+  let missingWorkspaceToastShown = false
 
   return {
     char: '@',
     allowSpaces: false,
+    allowedPrefixes: null,
 
     items: async ({ query }): Promise<FileIndexEntry[]> => {
       const wsPath = workspacePathRef.current
       if (!wsPath) {
         console.warn('[FileMention] workspacePath is null, mention disabled')
+        if (!missingWorkspaceToastShown) {
+          toast.warning('暂时无法引用文件', {
+            description: '当前 Agent 会话没有可用的工作区路径。请在顶部选择工作区，或新建 Agent 会话后重试。',
+          })
+          missingWorkspaceToastShown = true
+        }
         return []
       }
+      missingWorkspaceToastShown = false
 
       try {
         const additionalPaths = attachedDirsRef?.current ?? []
@@ -59,6 +69,8 @@ export function createFileMentionSuggestion(
       let popup: HTMLDivElement | null = null
       let resizeObserver: ResizeObserver | null = null
       let latestClientRect: (() => DOMRect | null) | null | undefined = null
+      let blurHandler: (() => void) | null = null
+      let editorRef: SuggestionProps<FileIndexEntry>['editor'] | null = null
 
       function splitEntries(result: FileSearchResult | null) {
         return {
@@ -86,10 +98,34 @@ export function createFileMentionSuggestion(
         positionPopup(popup, latestClientRect?.(), { anchorBottom: true })
       }
 
+      function cleanup() {
+        if (blurHandler && editorRef) {
+          editorRef.view.dom.removeEventListener('blur', blurHandler, true)
+          blurHandler = null
+        }
+        editorRef = null
+        mentionActiveRef.current = false
+        if (mentionItemCountRef) mentionItemCountRef.current = 0
+        lastResult = null
+        latestClientRect = null
+        resizeObserver?.disconnect()
+        resizeObserver = null
+        popup?.remove()
+        popup = null
+        renderer?.destroy()
+        renderer = null
+      }
+
       return {
         onStart(props) {
+          // 防御竞态：如果上一次弹窗未被正确清理，先清理残留
+          if (popup || renderer) {
+            cleanup()
+          }
+
           mentionActiveRef.current = true
           if (mentionItemCountRef) mentionItemCountRef.current = props.items.length
+          editorRef = props.editor
 
           try {
             latestClientRect = props.clientRect
@@ -101,8 +137,20 @@ export function createFileMentionSuggestion(
               anchorPopup()
             })
             resizeObserver.observe(popup!)
+
+            // 编辑器失焦时强制关闭弹窗（点击页面其他区域等场景）
+            blurHandler = () => {
+              // 延迟检查：点击弹窗本身不应关闭（焦点会回到编辑器）
+              setTimeout(() => {
+                if (!editorRef?.view.hasFocus() && popup) {
+                  cleanup()
+                }
+              }, 100)
+            }
+            props.editor.view.dom.addEventListener('blur', blurHandler, true)
           } catch (e) {
             console.error('[FileMention] render popup failed:', e)
+            cleanup()
           }
         },
 
@@ -129,16 +177,7 @@ export function createFileMentionSuggestion(
         },
 
         onExit() {
-          mentionActiveRef.current = false
-          if (mentionItemCountRef) mentionItemCountRef.current = 0
-          lastResult = null
-          latestClientRect = null
-          resizeObserver?.disconnect()
-          resizeObserver = null
-          popup?.remove()
-          popup = null
-          renderer?.destroy()
-          renderer = null
+          cleanup()
         },
       }
     },

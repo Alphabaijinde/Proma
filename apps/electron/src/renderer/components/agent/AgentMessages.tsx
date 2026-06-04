@@ -13,7 +13,6 @@ import {
   Message,
   MessageHeader,
   MessageContent,
-  MessageResponse,
   BasePathsProvider,
 } from '@/components/ai-elements/message'
 import {
@@ -34,9 +33,58 @@ import { ScrollPositionManager } from '@/hooks/useScrollPositionMemory'
 import { cn } from '@/lib/utils'
 import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { groupIntoTurns, MessageGroupRenderer, getGroupId, getGroupPreview, extractUserText, parseAttachedFiles as sdkParseAttachedFiles, isImageFile as sdkIsImageFile, CompactingIndicator, type MessageGroup } from './SDKMessageRenderer'
+import { groupIntoTurns, MessageGroupRenderer, getGroupId, getGroupPreview, extractUserText, parseAttachedFiles as sdkParseAttachedFiles, isImageFile as sdkIsImageFile, CompactingIndicator, buildHistoricalTaskSubjects, type MessageGroup } from './SDKMessageRenderer'
+import { buildLiveGroupSet } from './live-group-set'
+import { ContentBlock } from './ContentBlock'
+import { parseThinkTagsFromText } from './thinking-tag-parser'
 import type { AgentEventUsage, RetryAttempt, SDKMessage } from '@proma/shared'
 import type { AgentStreamState } from '@/atoms/agent-atoms'
+
+function stableStringify(value: unknown): string {
+  if (value == null || typeof value !== 'object') return JSON.stringify(value) ?? String(value)
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
+  const record = value as Record<string, unknown>
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`
+}
+
+/** 消息对象引用 → 稳定 key 缓存，避免内容相同的消息产生重复 key */
+const stableKeyCache = new WeakMap<object, string>()
+let stableKeyFallbackCounter = 0
+
+function getSDKMessageStableKey(message: SDKMessage): string {
+  const record = message as Record<string, unknown>
+  if (typeof record.uuid === 'string' && record.uuid.length > 0) {
+    return `${message.type}:uuid:${record.uuid}`
+  }
+
+  // 已缓存的消息对象直接返回，保证跨渲染稳定
+  if (stableKeyCache.has(message)) {
+    return stableKeyCache.get(message)!
+  }
+
+  const parentToolUseId = typeof record.parent_tool_use_id === 'string'
+    ? record.parent_tool_use_id
+    : ''
+  const sessionId = typeof record.session_id === 'string' ? record.session_id : ''
+
+  let key: string
+
+  if (message.type === 'result') {
+    const result = record as { subtype?: unknown; terminal_reason?: unknown; result?: unknown }
+    key = `result:${sessionId}:${String(result.subtype ?? '')}:${String(result.terminal_reason ?? '')}:${String(result.result ?? '')}:${++stableKeyFallbackCounter}`
+  } else if (message.type === 'system') {
+    const sys = record as { subtype?: unknown; task_id?: unknown; tool_use_id?: unknown }
+    key = `system:${sessionId}:${String(sys.subtype ?? '')}:${String(sys.task_id ?? '')}:${String(sys.tool_use_id ?? '')}:${stableStringify(record)}:${++stableKeyFallbackCounter}`
+  } else if ('message' in record) {
+    const inner = record.message as { content?: unknown } | undefined
+    key = `${message.type}:${sessionId}:${parentToolUseId}:${stableStringify(inner?.content)}:${++stableKeyFallbackCounter}`
+  } else {
+    key = `${message.type}:${sessionId}:${parentToolUseId}:${stableStringify(record)}:${++stableKeyFallbackCounter}`
+  }
+
+  stableKeyCache.set(message, key)
+  return key
+}
 
 /** AgentMessages 属性接口 */
 interface AgentMessagesProps {
@@ -351,12 +399,15 @@ export function AgentMessages({ sessionId, sessionModelId, messagesLoaded, persi
   const channels = useAtomValue(channelsAtom)
   /** 淡入控制：切换会话时先隐藏，等布局完成后再显示。 */
   const [ready, setReady] = React.useState(false)
+  // 空会话无需淡入过渡（无消息则无滚动位置问题）
+  const [skipFadeIn, setSkipFadeIn] = React.useState(false)
   const prevSessionIdRef = React.useRef<string | null>(null)
 
   React.useEffect(() => {
     if (sessionId !== prevSessionIdRef.current) {
       prevSessionIdRef.current = sessionId
       setReady(false)
+      setSkipFadeIn(false)
     }
   }, [sessionId])
 
@@ -373,6 +424,7 @@ export function AgentMessages({ sessionId, sessionModelId, messagesLoaded, persi
     }
 
     if ((!persistedSDKMessages || persistedSDKMessages.length === 0) && !streaming) {
+      setSkipFadeIn(true)
       setReady(true)
       return
     }
@@ -399,6 +451,11 @@ export function AgentMessages({ sessionId, sessionModelId, messagesLoaded, persi
   // 会导致 fallback 气泡与持久化消息同时渲染一帧（重复内容闪烁）。
   // 用原始 streamingContent 作为守卫：内容已清空且不在流式中，立即归零。
   const smoothContent = (streaming || streamingContent) ? rawSmoothContent : ''
+  const smoothContentBlocks = React.useMemo(() => {
+    if (!smoothContent) return []
+    return parseThinkTagsFromText(smoothContent)
+  }, [smoothContent])
+  const hasSmoothTextContent = smoothContentBlocks.some((block) => block.type === 'text')
 
   /**
    * 流式完成过渡：streaming 结束到持久化消息加载完成之间，
@@ -436,9 +493,42 @@ export function AgentMessages({ sessionId, sessionModelId, messagesLoaded, persi
   const allSDKMessages = React.useMemo(() => {
     const persisted = persistedSDKMessages ?? []
     const live = liveMessages ?? []
-    const liveSet = new Set(live)
-    return [...persisted.filter(m => !liveSet.has(m)), ...live]
-  }, [persistedSDKMessages, liveMessages])
+    const stampStableKey = (message: SDKMessage): SDKMessage => {
+      const key = getSDKMessageStableKey(message)
+      ;(message as Record<string, unknown>)._promaStableKey = key
+      return message
+    }
+    const keyOf = (message: SDKMessage): string =>
+      (message as Record<string, unknown>)._promaStableKey as string
+
+    const persistedWithKeys = persisted.map(stampStableKey)
+    const liveWithKeys = live.map(stampStableKey)
+    if (streaming || liveWithKeys.length === 0 || persistedWithKeys.length === 0) {
+      return [...persistedWithKeys, ...liveWithKeys]
+    }
+
+    // 流式结束后的刷新中，持久化消息尾部可能已经包含 live 序列。
+    // 只替换有序尾部重叠，避免按内容全局去重误删历史中的相同问答。
+    let overlap = Math.min(persistedWithKeys.length, liveWithKeys.length)
+    for (; overlap > 0; overlap--) {
+      const persistedStart = persistedWithKeys.length - overlap
+      const liveStart = liveWithKeys.length - overlap
+      let matches = true
+      for (let i = 0; i < overlap; i++) {
+        if (keyOf(persistedWithKeys[persistedStart + i]!) !== keyOf(liveWithKeys[liveStart + i]!)) {
+          matches = false
+          break
+        }
+      }
+      if (matches) break
+    }
+
+    if (overlap === 0) return [...persistedWithKeys, ...liveWithKeys]
+    return [
+      ...persistedWithKeys.slice(0, persistedWithKeys.length - overlap),
+      ...liveWithKeys,
+    ]
+  }, [persistedSDKMessages, liveMessages, streaming])
   const hasContent = allSDKMessages.length > 0
 
   // 压缩流程进行中（含收尾窗口：compact_boundary 已到但 result 未到）
@@ -452,24 +542,21 @@ export function AgentMessages({ sessionId, sessionModelId, messagesLoaded, persi
     return groupIntoTurns(allSDKMessages, sessionModelId)
   }, [allSDKMessages, sessionModelId])
 
+  // 跨 turn 历史 TaskCreate id → subject 映射：顶层算一次，避免每个 AssistantTurnRenderer
+  // 都对全量 allMessages 做 O(M) 扫描（流式期间 useMemo 因 allMessages 引用变化失效，
+  // 长会话会触发 O(T × M) 雪崩）。
+  const historicalTaskSubjects = React.useMemo(() => {
+    return buildHistoricalTaskSubjects(allSDKMessages)
+  }, [allSDKMessages])
+
   // 标记哪些 group 属于实时流式消息（用于 isStreaming / onFork 差异化渲染）
   const liveGroupSet = React.useMemo(() => {
-    if (!liveMessages || liveMessages.length === 0) return new Set<MessageGroup>()
-    const liveSet = new Set<SDKMessage>(liveMessages)
-    const result = new Set<MessageGroup>()
-    for (const group of allGroups) {
-      let isLive = false
-      if (group.type === 'user' || group.type === 'system') {
-        isLive = liveSet.has(group.message as SDKMessage)
-      } else {
-        // assistant-turn 可能被 mergeAdjacentSameModelTurns 合并，
-        // 需检查任意一条 assistantMessage 是否来自实时流
-        isLive = group.assistantMessages.some((m) => liveSet.has(m as SDKMessage))
-      }
-      if (isLive) result.add(group)
-    }
-    return result
-  }, [allGroups, liveMessages])
+    return buildLiveGroupSet({
+      allGroups,
+      liveMessages,
+      streaming,
+    })
+  }, [allGroups, liveMessages, streaming])
 
   // 迷你地图数据 — 直接使用统一的 allGroups（无需去重）
   const minimapItems: MinimapItem[] = React.useMemo(
@@ -512,11 +599,16 @@ export function AgentMessages({ sessionId, sessionModelId, messagesLoaded, persi
   }, [allGroups])
 
   // 实时消息中是否已有可渲染的助手内容
-  const hasLiveAssistantContent = allGroups.some((g) => g.type === 'assistant-turn' && liveGroupSet.has(g))
+  // 流式中：通过 liveGroupSet 精确判断（只有 streaming 时 liveGroupSet 才非空）
+  // 流式结束后：直接检查 liveMessages 中是否有助手消息，
+  // 防止 streaming→false 到 liveMessages 被清除之间的过渡帧中 fallback 气泡重复渲染
+  const hasLiveAssistantContent = streaming
+    ? allGroups.some((g) => g.type === 'assistant-turn' && liveGroupSet.has(g))
+    : (liveMessages != null && liveMessages.some((m) => (m as { type: string }).type === 'assistant'))
 
   return (
     <BasePathsProvider basePaths={attachedDirs}>
-    <Conversation resize={ready && !transitioning ? 'smooth' : 'instant'} className={ready ? 'opacity-100 transition-opacity duration-200' : 'opacity-0'}>
+    <Conversation resize={ready && !transitioning ? 'smooth' : 'instant'} className={ready ? (skipFadeIn ? 'opacity-100' : 'opacity-100 transition-opacity duration-200') : 'opacity-0'}>
       <ScrollPositionManager id={sessionId} ready={ready} />
       <ConversationContent>
         {!hasContent && !streaming ? (
@@ -526,6 +618,9 @@ export function AgentMessages({ sessionId, sessionModelId, messagesLoaded, persi
             {/* 统一消息渲染（持久化 + 实时合并为一个列表，确保 system 消息位置正确） */}
             {allGroups.map((group, idx) => {
               const isLive = liveGroupSet.has(group)
+              const isErrorGroup = group.type === 'assistant-turn'
+                && group.assistantMessages.some((m) => !!m.error)
+              const shouldDisableActions = isLive && !isErrorGroup
               // 仅在最后一个 assistant-turn 上显示"已被用户中断" badge
               const isLastAssistantTurn = !streaming && stoppedByUser
                 && group.type === 'assistant-turn'
@@ -535,12 +630,13 @@ export function AgentMessages({ sessionId, sessionModelId, messagesLoaded, persi
                   key={getGroupId(group)}
                   group={group}
                   allMessages={allSDKMessages}
+                  historicalTaskSubjects={historicalTaskSubjects}
                   basePath={sessionPath || undefined}
-                  onFork={isLive ? undefined : onFork}
-                  onRewind={isLive ? undefined : onRewind}
-                  onRetry={isLive ? undefined : onRetry}
-                  onRetryInNewSession={isLive ? undefined : onRetryInNewSession}
-                  onCompact={isLive ? undefined : onCompact}
+                  onFork={shouldDisableActions ? undefined : onFork}
+                  onRewind={shouldDisableActions ? undefined : onRewind}
+                  onRetry={shouldDisableActions ? undefined : onRetry}
+                  onRetryInNewSession={shouldDisableActions ? undefined : onRetryInNewSession}
+                  onCompact={shouldDisableActions ? undefined : onCompact}
                   isStreaming={isLive || undefined}
                   stoppedByUser={isLastAssistantTurn || undefined}
                   sessionModelId={sessionModelId}
@@ -571,7 +667,20 @@ export function AgentMessages({ sessionId, sessionModelId, messagesLoaded, persi
                   {retrying && <RetryingNotice retrying={retrying} />}
                   {smoothContent ? (
                     <>
-                      <MessageResponse basePath={sessionPath || undefined} basePaths={attachedDirs}>{smoothContent}</MessageResponse>
+                      <div className={cn('space-y-2')}>
+                        {smoothContentBlocks.map((block, index) => (
+                          <ContentBlock
+                            key={index}
+                            block={block}
+                            allMessages={allSDKMessages}
+                            basePath={sessionPath || undefined}
+                            basePaths={attachedDirs}
+                            index={index}
+                            dimmed={hasSmoothTextContent && block.type !== 'text'}
+                            isStreaming={streaming}
+                          />
+                        ))}
+                      </div>
                       {streaming && <AgentRunningIndicator startedAt={startedAt} />}
                     </>
                   ) : (
