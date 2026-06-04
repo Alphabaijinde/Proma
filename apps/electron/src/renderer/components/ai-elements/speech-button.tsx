@@ -105,6 +105,19 @@ function shouldUseChromeWebSpeechBridge(error: string): boolean {
   return CHROME_WEB_SPEECH_BRIDGE_ERRORS.has(error)
 }
 
+async function startChromeWebSpeechBridge(settings: VoiceDictationSettings): Promise<void> {
+  const result = await window.electronAPI.startChromeWebSpeech({
+    language: getRecognitionLanguage(settings),
+    targetIsProma: true,
+  })
+
+  if (result.success) {
+    toast.info('已启动 Chrome 语音桥接')
+  } else {
+    toast.error(result.message)
+  }
+}
+
 async function insertTranscript(text: string, onTranscript?: (text: string) => void): Promise<void> {
   const trimmed = text.trim()
   if (!trimmed) return
@@ -175,13 +188,16 @@ export function SpeechButton({
   }, [])
 
   const startChromiumWebSpeech = useCallback((settings: VoiceDictationSettings): void => {
+    focusPromaInput()
+
     const SpeechRecognitionCtor = getSpeechRecognition()
     if (!SpeechRecognitionCtor) {
-      toast.error('当前 Electron/Chromium 不支持 Web Speech API')
+      void startChromeWebSpeechBridge(settings).catch((error) => {
+        console.error('[语音输入] 启动 Chrome Web Speech 桥接失败:', error)
+        toast.error('启动 Chrome Web Speech 桥接失败')
+      })
       return
     }
-
-    focusPromaInput()
 
     const recognition = new SpeechRecognitionCtor()
     recognition.lang = getRecognitionLanguage(settings)
@@ -209,14 +225,7 @@ export function SpeechButton({
       recognitionRef.current = null
 
       if (shouldUseChromeWebSpeechBridge(event.error)) {
-        void window.electronAPI.startChromeWebSpeech({ language: getRecognitionLanguage(settings) })
-          .then((result) => {
-            if (result.success) {
-              toast.info('已在后台启动 Chrome 语音桥接')
-            } else {
-              toast.error(result.message)
-            }
-          })
+        void startChromeWebSpeechBridge(settings)
           .catch((error) => {
             console.error('[语音输入] 启动 Chrome Web Speech 桥接失败:', error)
             toast.error('启动 Chrome Web Speech 桥接失败')

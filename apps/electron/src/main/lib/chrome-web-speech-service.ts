@@ -7,7 +7,7 @@
  * posts the transcript back to Proma over localhost.
  */
 
-import { app } from 'electron'
+import { app, Notification } from 'electron'
 import { existsSync, mkdirSync } from 'fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
 import { join } from 'path'
@@ -16,11 +16,14 @@ import { spawn, type ChildProcess } from 'child_process'
 import { VOICE_DICTATION_IPC_CHANNELS } from '../../types'
 import type { ChromeWebSpeechStartInput, ChromeWebSpeechStartResult } from '../../types'
 import { getMainWindow } from '../index'
+import { captureVoiceDictationTarget, commitVoiceDictationText } from './text-output-service'
+import { getVoiceDictationSettings } from './voice-dictation-settings-service'
 
 interface ChromeSpeechSession {
   token: string
   language: string
   createdAt: number
+  targetIsProma: boolean
   child?: ChildProcess
 }
 
@@ -36,14 +39,26 @@ export async function startChromeWebSpeech(
 ): Promise<ChromeWebSpeechStartResult> {
   const chromePath = findChromeExecutable()
   if (!chromePath) {
-    throw new Error('Google Chrome was not found, so the Chrome Web Speech bridge cannot start')
+    return {
+      success: false,
+      message: '未找到 Google Chrome，无法启动 Chrome 语音桥接',
+    }
   }
 
-  await ensureServer()
+  try {
+    await ensureServer()
+  } catch (error) {
+    console.error('[Voice input] Chrome Web Speech bridge failed to bind localhost:', error)
+    return {
+      success: false,
+      message: 'Chrome 语音桥接本地服务启动失败',
+    }
+  }
   cleanupExpiredSessions()
 
   const token = randomBytes(18).toString('hex')
   const language = input.language || 'zh-CN'
+  const targetIsProma = input.targetIsProma ?? true
   const url = `http://127.0.0.1:${serverPort}/?token=${encodeURIComponent(token)}&lang=${encodeURIComponent(language)}&quiet=${SHOW_BRIDGE_WINDOW ? '0' : '1'}`
   const userDataDir = join(app.getPath('userData'), 'chrome-web-speech-profile')
   mkdirSync(userDataDir, { recursive: true })
@@ -69,19 +84,31 @@ export async function startChromeWebSpeech(
     )
   }
 
-  const child = spawn(chromePath, args, {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: !SHOW_BRIDGE_WINDOW,
-  })
+  let child: ChildProcess
+  try {
+    child = spawn(chromePath, args, {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: !SHOW_BRIDGE_WINDOW,
+    })
+  } catch (error) {
+    console.error('[Voice input] Chrome Web Speech bridge failed to launch Chrome:', error)
+    return {
+      success: false,
+      message: '启动 Google Chrome 语音桥接失败',
+    }
+  }
   child.unref()
+  captureVoiceDictationTarget(targetIsProma)
 
   sessions.set(token, {
     token,
     language,
     createdAt: Date.now(),
+    targetIsProma,
     child,
   })
+  console.log('[Voice input] Chrome Web Speech bridge started', { language, targetIsProma })
 
   return {
     success: true,
@@ -147,7 +174,11 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     }
 
     if (text) {
-      insertTextIntoProma(text)
+      console.log('[Voice input] Chrome Web Speech transcript received', {
+        length: text.length,
+        targetIsProma: session.targetIsProma,
+      })
+      await outputChromeWebSpeechText(text, session)
     }
     sessions.delete(token)
     writeJson(response, 200, { success: true })
@@ -160,7 +191,13 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     const error = typeof body.error === 'string' ? body.error : 'unknown'
     const message = typeof body.message === 'string' ? body.message : ''
     if (sessions.has(token)) {
-      console.error('[Voice input] Chrome Web Speech recognition failed:', error, message)
+      if (error === 'aborted') {
+        console.log('[Voice input] Chrome Web Speech recognition aborted')
+      } else {
+        console.error('[Voice input] Chrome Web Speech recognition failed:', error, message)
+        notifyChromeWebSpeechError(error, message)
+      }
+      sessions.delete(token)
     }
     writeJson(response, 200, { success: true })
     return
@@ -169,13 +206,80 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
   writeJson(response, 404, { success: false, message: 'not found' })
 }
 
-function insertTextIntoProma(text: string): void {
+async function outputChromeWebSpeechText(text: string, session: ChromeSpeechSession): Promise<void> {
+  if (!session.targetIsProma) {
+    const result = await commitVoiceDictationText(text, getVoiceDictationSettings())
+    console.log('[Voice input] Chrome Web Speech transcript output completed', {
+      mode: result.mode,
+      success: result.success,
+    })
+    if (!result.success) {
+      notifyChromeWebSpeechError('output-failed', result.message)
+    }
+    return
+  }
+
+  const success = insertTextIntoProma(text)
+  console.log('[Voice input] Chrome Web Speech transcript output completed', {
+    mode: 'proma-input',
+    success,
+  })
+  if (!success) {
+    notifyChromeWebSpeechError('output-failed', '无法写入 Proma 输入框')
+  }
+}
+
+function insertTextIntoProma(text: string): boolean {
   const mainWindow = getMainWindow()
-  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (!mainWindow || mainWindow.isDestroyed()) return false
 
   mainWindow.webContents.send(VOICE_DICTATION_IPC_CHANNELS.INSERT_TEXT, { text })
   mainWindow.show()
   mainWindow.focus()
+  return true
+}
+
+export function notifyChromeWebSpeechError(error: string, message?: string): void {
+  const mainWindow = getMainWindow()
+  if (!mainWindow || mainWindow.isDestroyed()) return
+
+  mainWindow.webContents.send(VOICE_DICTATION_IPC_CHANNELS.CHROME_WEB_SPEECH_ERROR, {
+    error,
+    message: message || undefined,
+  })
+
+  if ((!mainWindow.isVisible() || !mainWindow.isFocused()) && Notification.isSupported()) {
+    new Notification({
+      title: 'Proma 语音输入',
+      body: message || getChromeWebSpeechErrorMessage(error),
+      silent: true,
+    }).show()
+  }
+}
+
+function getChromeWebSpeechErrorMessage(error: string): string {
+  switch (error) {
+    case 'no-speech':
+      return '没有识别到语音，请再试一次'
+    case 'not-allowed':
+      return 'Chrome 麦克风权限被拒绝'
+    case 'audio-capture':
+      return '没有可用的麦克风输入'
+    case 'network':
+      return 'Chrome 语音识别服务网络不可用'
+    case 'service-not-allowed':
+      return 'Chrome 当前无法使用语音识别服务'
+    case 'timeout':
+      return 'Chrome 语音桥接已超时'
+    case 'start-failed':
+      return 'Chrome 语音桥接启动失败'
+    case 'not-supported':
+      return '当前 Chrome 不支持 Web Speech API'
+    case 'output-failed':
+      return '语音文本写入失败'
+    default:
+      return `Chrome 语音识别失败：${error || '未知错误'}`
+  }
 }
 
 function cleanupExpiredSessions(): void {
@@ -306,6 +410,11 @@ function renderChromeSpeechPage(token: string, language: string, quiet: boolean)
     const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     let recognition = null;
     let started = false;
+    let completed = false;
+    let lastTranscript = '';
+    let listenStartedAt = 0;
+    let noSpeechRetries = 0;
+    const maxNoSpeechRetries = quiet ? 2 : 0;
     let quietTimeout = quiet ? setTimeout(() => {
       post('/error', { error: 'timeout', message: 'Chrome Web Speech bridge timed out' });
       window.close();
@@ -340,44 +449,76 @@ function renderChromeSpeechPage(token: string, language: string, quiet: boolean)
       }
     }
 
+    async function finishWithTranscript(text) {
+      const transcript = (text || '').trim();
+      if (!transcript || completed) return false;
+      completed = true;
+      started = false;
+      resetButton();
+      setStatus('Recognized: ' + transcript);
+      await post('/result', { text: transcript });
+      closeIfQuiet();
+      return true;
+    }
+
+    function retryNoSpeech() {
+      if (completed || noSpeechRetries >= maxNoSpeechRetries) return false;
+      noSpeechRetries += 1;
+      started = false;
+      resetButton();
+      setStatus('Still listening... speak after the microphone indicator appears.');
+      setTimeout(begin, 350);
+      return true;
+    }
+
     function begin() {
-      if (started) return;
+      if (started || completed) return;
       if (!Recognition) {
         setStatus('Current Chrome does not support Web Speech API.');
+        completed = true;
+        post('/error', { error: 'not-supported', message: 'Current Chrome does not support Web Speech API' });
         closeIfQuiet();
         return;
       }
 
       started = true;
+      completed = false;
+      if (!listenStartedAt) listenStartedAt = Date.now();
       button.disabled = true;
       button.classList.add('recording');
       setStatus('Listening...');
 
       recognition = new Recognition();
       recognition.lang = language || 'zh-CN';
-      recognition.continuous = false;
-      recognition.interimResults = false;
+      recognition.continuous = true;
+      recognition.interimResults = true;
       recognition.maxAlternatives = 1;
 
       recognition.onresult = async (event) => {
-        let text = '';
+        let finalText = '';
+        let interimText = '';
         for (let index = event.resultIndex; index < event.results.length; index += 1) {
           const result = event.results[index];
-          if (result && result.isFinal) {
-            text += (result[0] && result[0].transcript) || '';
+          if (result && result[0]) {
+            const piece = result[0].transcript || '';
+            if (result.isFinal) {
+              finalText += piece;
+            } else {
+              interimText += piece;
+            }
           }
         }
-        text = text.trim();
-        if (!text) {
-          setStatus('No speech was recognized. Try again.');
-          started = false;
-          resetButton();
-          closeIfQuiet();
+        finalText = finalText.trim();
+        interimText = interimText.trim();
+        if (finalText) {
+          lastTranscript = finalText;
+          await finishWithTranscript(finalText);
           return;
         }
-        setStatus('Recognized: ' + text);
-        await post('/result', { text });
-        setTimeout(() => window.close(), 700);
+        if (interimText) {
+          lastTranscript = interimText;
+          setStatus('Listening... ' + interimText);
+        }
       };
 
       recognition.onerror = async (event) => {
@@ -385,21 +526,39 @@ function renderChromeSpeechPage(token: string, language: string, quiet: boolean)
         resetButton();
         const error = event && event.error ? event.error : 'unknown';
         const message = event && event.message ? event.message : '';
+        if (error === 'no-speech') {
+          if (lastTranscript && await finishWithTranscript(lastTranscript)) return;
+          if (retryNoSpeech()) return;
+        }
+        completed = true;
         setStatus('Chrome speech recognition failed: ' + error + (message ? ', ' + message : '') + '. Click the microphone to retry.');
         await post('/error', { error, message });
         closeIfQuiet();
       };
 
-      recognition.onend = () => {
+      recognition.onend = async () => {
         if (!started) return;
         started = false;
         resetButton();
+        if (!completed) {
+          if (lastTranscript && await finishWithTranscript(lastTranscript)) return;
+          if (retryNoSpeech()) return;
+          completed = true;
+          const elapsedMs = Date.now() - listenStartedAt;
+          setStatus('No speech was recognized. Try again.');
+          await post('/error', {
+            error: 'no-speech',
+            message: 'Chrome speech recognition ended without a transcript after ' + elapsedMs + 'ms',
+          });
+          closeIfQuiet();
+        }
       };
 
       try {
         recognition.start();
       } catch (error) {
         started = false;
+        completed = true;
         resetButton();
         setStatus('Failed to start. Click the microphone to retry.');
         post('/error', { error: 'start-failed', message: String(error && error.message ? error.message : error) });

@@ -94,12 +94,20 @@ export interface VoiceDictationStartInput {
 /** Chrome Web Speech 桥接启动参数 */
 export interface ChromeWebSpeechStartInput {
   language?: string
+  /** 是否把识别结果写回 Proma 输入框；false 时按全局语音输出模式写入 */
+  targetIsProma?: boolean
 }
 
 /** Chrome Web Speech 桥接启动结果 */
 export interface ChromeWebSpeechStartResult {
   success: boolean
   message: string
+}
+
+/** Chrome Web Speech 桥接错误事件 */
+export interface ChromeWebSpeechErrorEvent {
+  error: string
+  message?: string
 }
 
 /** 语音音频分片 */
@@ -296,6 +304,8 @@ export const VOICE_DICTATION_IPC_CHANNELS = {
   STATE: 'voice-dictation:state',
   /** 主窗口插入文本 */
   INSERT_TEXT: 'voice-dictation:insert-text',
+  /** Chrome Web Speech 桥接错误 */
+  CHROME_WEB_SPEECH_ERROR: 'voice-dictation:chrome-web-speech-error',
   /** 检查麦克风权限状态 */
   CHECK_MIC_PERMISSION: 'voice-dictation:check-mic-permission',
   /** 请求麦克风权限 */

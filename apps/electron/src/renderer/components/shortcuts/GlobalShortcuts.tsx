@@ -11,6 +11,7 @@
 
 import { useEffect, useCallback } from 'react'
 import { useAtomValue, useSetAtom, useAtom, useStore } from 'jotai'
+import { toast } from 'sonner'
 import { appModeAtom } from '@/atoms/app-mode'
 import { settingsOpenAtom, channelFormDirtyAtom, settingsCloseRequestedAtom } from '@/atoms/settings-tab'
 import { searchDialogOpenAtom } from '@/atoms/search-atoms'
@@ -46,6 +47,31 @@ import {
   initShortcutRegistry,
   updateShortcutOverrides,
 } from '@/lib/shortcut-registry'
+
+function getChromeWebSpeechErrorMessage(error: string): string {
+  switch (error) {
+    case 'no-speech':
+      return '没有识别到语音，请再试一次'
+    case 'not-allowed':
+      return 'Chrome 麦克风权限被拒绝'
+    case 'audio-capture':
+      return '没有可用的麦克风输入'
+    case 'network':
+      return 'Chrome 语音识别服务网络不可用'
+    case 'service-not-allowed':
+      return 'Chrome 当前无法使用语音识别服务'
+    case 'timeout':
+      return 'Chrome 语音桥接已超时'
+    case 'start-failed':
+      return 'Chrome 语音桥接启动失败'
+    case 'not-supported':
+      return '当前 Chrome 不支持 Web Speech API'
+    case 'output-failed':
+      return '语音文本写入失败'
+    default:
+      return `Chrome 语音识别失败：${error || '未知错误'}`
+  }
+}
 
 /**
  * 快捷键初始化 + 全局 Handler 注册
@@ -369,6 +395,15 @@ export function GlobalShortcuts(): null {
     })
     return cleanup
   }, [store])
+
+  useEffect(() => {
+    const cleanup = window.electronAPI.onChromeWebSpeechError(({ error, message }) => {
+      toast.error(getChromeWebSpeechErrorMessage(error), {
+        description: message || undefined,
+      })
+    })
+    return cleanup
+  }, [])
 
   // ===== 菜单栏 → 打开 / 创建会话 =====
 

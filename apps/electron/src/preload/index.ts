@@ -103,6 +103,7 @@ import type {
   UserProfile,
   AppSettings,
   ChromeWebSpeechStartInput,
+  ChromeWebSpeechErrorEvent,
   ChromeWebSpeechStartResult,
   QuickTaskSubmitInput,
   QuickTaskOpenSessionData,
@@ -837,6 +838,9 @@ export interface ElectronAPI {
   onVoiceDictationState: (callback: (event: VoiceDictationStateEvent) => void) => () => void
   /** 订阅主窗口插入语音文本事件 */
   onVoiceDictationInsertText: (callback: (data: { text: string }) => void) => () => void
+
+  /** 订阅 Chrome Web Speech 桥接错误事件 */
+  onChromeWebSpeechError: (callback: (event: ChromeWebSpeechErrorEvent) => void) => () => void
 
   /** 检查麦克风权限状态 */
   checkMicrophonePermission: () => Promise<MicPermissionResult>
@@ -1901,6 +1905,12 @@ const electronAPI: ElectronAPI = {
     const listener = (_: unknown, data: { text: string }): void => callback(data)
     ipcRenderer.on(VOICE_DICTATION_IPC_CHANNELS.INSERT_TEXT, listener)
     return () => { ipcRenderer.removeListener(VOICE_DICTATION_IPC_CHANNELS.INSERT_TEXT, listener) }
+  },
+
+  onChromeWebSpeechError: (callback: (event: ChromeWebSpeechErrorEvent) => void) => {
+    const listener = (_: unknown, event: ChromeWebSpeechErrorEvent): void => callback(event)
+    ipcRenderer.on(VOICE_DICTATION_IPC_CHANNELS.CHROME_WEB_SPEECH_ERROR, listener)
+    return () => { ipcRenderer.removeListener(VOICE_DICTATION_IPC_CHANNELS.CHROME_WEB_SPEECH_ERROR, listener) }
   },
 
   checkMicrophonePermission: () => {

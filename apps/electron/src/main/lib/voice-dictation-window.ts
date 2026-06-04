@@ -97,10 +97,28 @@ export function createVoiceDictationWindow(): void {
 }
 
 export function toggleVoiceDictationWindow(options: VoiceDictationToggleOptions = {}): void {
-  const provider = getVoiceDictationSettings().provider
+  const settings = getVoiceDictationSettings()
 
-  if (!isDoubaoDictation(provider)) {
-    console.log('[语音输入] 当前使用 Chromium 原生语音识别，请通过输入框麦克风按钮触发')
+  if (!isVoiceDictationEnabled()) {
+    console.log('[语音输入] 功能未启用，忽略唤起请求')
+    return
+  }
+
+  if (!isDoubaoDictation(settings.provider)) {
+    void import('./chrome-web-speech-service')
+      .then(({ notifyChromeWebSpeechError, startChromeWebSpeech }) => {
+        return startChromeWebSpeech({
+          language: settings.language && settings.language !== 'auto' ? settings.language : 'zh-CN',
+          targetIsProma: options.targetIsProma,
+        }).then((result) => {
+          if (!result.success) {
+            notifyChromeWebSpeechError('start-failed', result.message)
+          }
+        })
+      })
+      .catch((error) => {
+        console.error('[语音输入] 启动 Chrome Web Speech 桥接失败:', error)
+      })
     return
   }
 
@@ -108,11 +126,6 @@ export function toggleVoiceDictationWindow(options: VoiceDictationToggleOptions 
 
   if (win?.isVisible()) {
     win.webContents.send(VOICE_DICTATION_IPC_CHANNELS.TOGGLE_STOP)
-    return
-  }
-
-  if (!isVoiceDictationEnabled()) {
-    console.log('[语音输入] 功能未启用，忽略唤起请求')
     return
   }
 
